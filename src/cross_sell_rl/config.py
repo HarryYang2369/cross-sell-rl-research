@@ -1,0 +1,287 @@
+"""Typed configuration loading.
+
+The YAML config file is the single source of truth for where data comes from,
+what the columns are called, which products can be offered, how reward is
+defined, and how experiments run. Every key is optional: omitted keys fall
+back to the defaults below, which match ``configs/default.yaml``.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any
+
+import yaml
+
+VALID_SOURCES = ("synthetic", "csv", "parquet", "databricks")
+VALID_REWARD_TYPES = ("conversion", "revenue")
+
+_DEFAULT_NUMERIC_FEATURES = ("age", "tenure_years", "annual_premium", "num_claims", "credit_score")
+_DEFAULT_CATEGORICAL_FEATURES = ("region", "acquisition_channel")
+_DEFAULT_CATALOG = ("home", "life", "health", "travel", "pet")
+_DEFAULT_PREMIUMS: Mapping[str, float] = MappingProxyType(
+    {"home": 950.0, "life": 620.0, "health": 1400.0, "travel": 180.0, "pet": 320.0}
+)
+_DEFAULT_AGENTS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
+    {
+        "random": MappingProxyType({}),
+        "epsilon_greedy": MappingProxyType({"epsilon": 0.1}),
+        "linucb": MappingProxyType({"alpha": 1.0}),
+        "lin_ts": MappingProxyType({"scale": 0.3}),
+    }
+)
+
+
+class ConfigError(ValueError):
+    """Raised when the config file is missing, malformed, or inconsistent."""
+
+
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise ConfigError(message)
+
+
+@dataclass(frozen=True)
+class SchemaConfig:
+    """Column mapping between the config and the customer data."""
+
+    customer_id: str = "customer_id"
+    numeric_features: tuple[str, ...] = _DEFAULT_NUMERIC_FEATURES
+    categorical_features: tuple[str, ...] = _DEFAULT_CATEGORICAL_FEATURES
+    owned_product_prefix: str = "has_"
+
+    def owned_column(self, product: str) -> str:
+        """Name of the 0/1 column that marks ownership of ``product``."""
+        return f"{self.owned_product_prefix}{product}"
+
+
+@dataclass(frozen=True)
+class DatabricksConfig:
+    catalog: str | None = None
+    schema: str | None = None
+    table: str | None = None
+
+
+@dataclass(frozen=True)
+class DataConfig:
+    source: str = "synthetic"
+    path: str | None = None
+    databricks: DatabricksConfig = field(default_factory=DatabricksConfig)
+    schema: SchemaConfig = field(default_factory=SchemaConfig)
+
+
+@dataclass(frozen=True)
+class ProductsConfig:
+    catalog: tuple[str, ...] = _DEFAULT_CATALOG
+    premiums: Mapping[str, float] = _DEFAULT_PREMIUMS
+
+
+@dataclass(frozen=True)
+class RewardConfig:
+    type: str = "conversion"
+
+
+@dataclass(frozen=True)
+class SyntheticConfig:
+    n_customers: int = 5000
+    seed: int = 7
+
+
+@dataclass(frozen=True)
+class EnvironmentConfig:
+    base_conversion_rate: float = 0.06
+    context_influence: float = 1.4
+    seed: int = 2026
+
+
+@dataclass(frozen=True)
+class ExperimentConfig:
+    n_rounds: int = 30000
+    seed: int = 42
+    output_dir: str = "results"
+    agents: Mapping[str, Mapping[str, Any]] = _DEFAULT_AGENTS
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    data: DataConfig = field(default_factory=DataConfig)
+    products: ProductsConfig = field(default_factory=ProductsConfig)
+    reward: RewardConfig = field(default_factory=RewardConfig)
+    synthetic: SyntheticConfig = field(default_factory=SyntheticConfig)
+    environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
+    experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
+
+
+def load_config(path: str | Path) -> AppConfig:
+    """Load and validate an :class:`AppConfig` from a YAML file."""
+    path = Path(path)
+    _require(path.is_file(), f"Config file not found: {path}")
+    with path.open("r", encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle)
+    _require(raw is None or isinstance(raw, dict), f"Top level of {path} must be a mapping")
+    return config_from_dict(raw or {})
+
+
+def config_from_dict(raw: Mapping[str, Any]) -> AppConfig:
+    """Build and validate a config from a YAML-shaped dictionary."""
+    config = AppConfig(
+        data=_parse_data(_section(raw, "data")),
+        products=_parse_products(_section(raw, "products")),
+        reward=_parse_reward(_section(raw, "reward")),
+        synthetic=_parse_synthetic(_section(raw, "synthetic")),
+        environment=_parse_environment(_section(raw, "environment")),
+        experiment=_parse_experiment(_section(raw, "experiment")),
+    )
+    _validate(config)
+    return config
+
+
+def _section(raw: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    value = raw.get(key) or {}
+    _require(isinstance(value, Mapping), f"Config section '{key}' must be a mapping")
+    return value
+
+
+def _str_tuple(value: Any, name: str) -> tuple[str, ...]:
+    _require(isinstance(value, (list, tuple)), f"'{name}' must be a list of column names")
+    return tuple(str(item) for item in value)
+
+
+def _parse_data(section: Mapping[str, Any]) -> DataConfig:
+    defaults = SchemaConfig()
+    schema_raw = section.get("schema") or {}
+    _require(isinstance(schema_raw, Mapping), "'data.schema' must be a mapping")
+    schema = SchemaConfig(
+        customer_id=str(schema_raw.get("customer_id", defaults.customer_id)),
+        numeric_features=_str_tuple(
+            schema_raw.get("numeric_features", defaults.numeric_features),
+            "data.schema.numeric_features",
+        ),
+        categorical_features=_str_tuple(
+            schema_raw.get("categorical_features", defaults.categorical_features),
+            "data.schema.categorical_features",
+        ),
+        owned_product_prefix=str(
+            schema_raw.get("owned_product_prefix", defaults.owned_product_prefix)
+        ),
+    )
+    databricks_raw = section.get("databricks") or {}
+    _require(isinstance(databricks_raw, Mapping), "'data.databricks' must be a mapping")
+    databricks = DatabricksConfig(
+        catalog=databricks_raw.get("catalog"),
+        schema=databricks_raw.get("schema"),
+        table=databricks_raw.get("table"),
+    )
+    path = section.get("path")
+    return DataConfig(
+        source=str(section.get("source", "synthetic")),
+        path=None if path is None else str(path),
+        databricks=databricks,
+        schema=schema,
+    )
+
+
+def _parse_products(section: Mapping[str, Any]) -> ProductsConfig:
+    defaults = ProductsConfig()
+    catalog = _str_tuple(section.get("catalog", defaults.catalog), "products.catalog")
+    premiums_raw = section.get("premiums", defaults.premiums)
+    _require(isinstance(premiums_raw, Mapping), "'products.premiums' must be a mapping")
+    premiums = {str(product): float(value) for product, value in premiums_raw.items()}
+    return ProductsConfig(catalog=catalog, premiums=premiums)
+
+
+def _parse_reward(section: Mapping[str, Any]) -> RewardConfig:
+    return RewardConfig(type=str(section.get("type", "conversion")))
+
+
+def _parse_synthetic(section: Mapping[str, Any]) -> SyntheticConfig:
+    defaults = SyntheticConfig()
+    return SyntheticConfig(
+        n_customers=int(section.get("n_customers", defaults.n_customers)),
+        seed=int(section.get("seed", defaults.seed)),
+    )
+
+
+def _parse_environment(section: Mapping[str, Any]) -> EnvironmentConfig:
+    defaults = EnvironmentConfig()
+    return EnvironmentConfig(
+        base_conversion_rate=float(
+            section.get("base_conversion_rate", defaults.base_conversion_rate)
+        ),
+        context_influence=float(section.get("context_influence", defaults.context_influence)),
+        seed=int(section.get("seed", defaults.seed)),
+    )
+
+
+def _parse_experiment(section: Mapping[str, Any]) -> ExperimentConfig:
+    defaults = ExperimentConfig()
+    agents_raw = section.get("agents", defaults.agents)
+    _require(isinstance(agents_raw, Mapping), "'experiment.agents' must be a mapping")
+    agents: dict[str, dict[str, Any]] = {}
+    for name, params in agents_raw.items():
+        params = params or {}
+        _require(
+            isinstance(params, Mapping),
+            f"Parameters for agent '{name}' must be a mapping, got {type(params).__name__}",
+        )
+        agents[str(name)] = dict(params)
+    return ExperimentConfig(
+        n_rounds=int(section.get("n_rounds", defaults.n_rounds)),
+        seed=int(section.get("seed", defaults.seed)),
+        output_dir=str(section.get("output_dir", defaults.output_dir)),
+        agents=agents,
+    )
+
+
+def _validate(config: AppConfig) -> None:
+    data, products = config.data, config.products
+    _require(
+        data.source in VALID_SOURCES,
+        f"data.source must be one of {VALID_SOURCES}, got '{data.source}'",
+    )
+    if data.source in ("csv", "parquet"):
+        _require(bool(data.path), f"data.path is required when data.source is '{data.source}'")
+    if data.source == "databricks":
+        db = data.databricks
+        _require(
+            all([db.catalog, db.schema, db.table]),
+            "data.databricks.catalog/schema/table are all required when "
+            "data.source is 'databricks'",
+        )
+
+    _require(len(products.catalog) > 0, "products.catalog must list at least one product")
+    _require(
+        len(set(products.catalog)) == len(products.catalog),
+        "products.catalog contains duplicate product names",
+    )
+    overlap = set(data.schema.numeric_features) & set(data.schema.categorical_features)
+    _require(
+        not overlap,
+        f"Columns listed as both numeric and categorical: {sorted(overlap)}",
+    )
+
+    _require(
+        config.reward.type in VALID_REWARD_TYPES,
+        f"reward.type must be one of {VALID_REWARD_TYPES}, got '{config.reward.type}'",
+    )
+    if config.reward.type == "revenue":
+        missing = [p for p in products.catalog if p not in products.premiums]
+        _require(
+            not missing,
+            f"reward.type 'revenue' needs a premium for every product; missing: {missing}",
+        )
+
+    _require(config.synthetic.n_customers > 0, "synthetic.n_customers must be positive")
+    _require(
+        0.0 < config.environment.base_conversion_rate < 1.0,
+        "environment.base_conversion_rate must be strictly between 0 and 1",
+    )
+    _require(
+        config.environment.context_influence >= 0.0,
+        "environment.context_influence must be non-negative",
+    )
+    _require(config.experiment.n_rounds > 0, "experiment.n_rounds must be positive")
+    _require(len(config.experiment.agents) > 0, "experiment.agents must list at least one agent")
