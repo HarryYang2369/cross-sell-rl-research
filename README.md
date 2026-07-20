@@ -99,6 +99,36 @@ schemas work end-to-end before you know your real column names.
 validated) but intentionally unimplemented until workspace credentials exist —
 the loader raises a clear message pointing at the csv/parquet route.
 
+## The enhanced config (`configs/enhanced.yaml`)
+
+A second config models the real production schema (synthetic until an export
+lands) and maps the five design considerations onto YAML sections:
+
+| Design consideration | Config section |
+|---|---|
+| 1. State space | `state.feature_groups` — named groups (profile, holdings, behaviour, channel, engagement, value_segment, agent_context), each toggleable |
+| 2. Action space | `products.catalog` — product categories |
+| 3. Reward | `reward.type: conversion \| ape \| vnb` + `products.ape` / `products.vnb` value tables |
+| 4. Temporal trends | `state.trends` — short-vs-long window activity ratios |
+| 5. Coverage gaps | `state.coverage_gaps` — holdings vs. the segment-typical portfolio |
+
+`state.delivery: assigned_agent | mixed | direct` controls whether
+servicing-agent quality features enter the state (direct sales have no human
+intermediary, so they are excluded automatically).
+
+Model entries may carry a `type:` (algorithm) so the same algorithm can run
+under several labels with different state designs:
+
+```yaml
+agents:
+  baseline: {type: linucb, alpha: 1.0, features: [profile, holdings], derived: false}
+  enhanced: {type: linucb, alpha: 1.0}   # all active groups + derived features
+```
+
+`features:` restricts a model to selected groups and `derived: false` hides
+the trend/coverage-gap features — that is how a baseline state design and an
+enhanced one compete fairly on identical customer sequences.
+
 ## Project layout
 
 ```

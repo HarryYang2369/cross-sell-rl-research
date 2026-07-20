@@ -48,11 +48,16 @@ def run_simulation(
     simulator: CrossSellSimulator,
     customer_sequence: np.ndarray,
     rng: np.random.Generator,
+    feature_indices: np.ndarray | None = None,
+    label: str | None = None,
 ) -> SimulationResult:
     """Play ``agent`` through the given customer sequence, learning as it goes.
 
     Passing the same ``customer_sequence`` to every agent makes comparisons
     fair: all agents face the same customers in the same order.
+    ``feature_indices`` restricts which context dimensions the agent sees
+    (the simulator itself always acts on the full state); ``label`` names the
+    run in results, defaulting to the agent's registry name.
     """
     n_rounds = len(customer_sequence)
     rewards = np.zeros(n_rounds)
@@ -60,7 +65,8 @@ def run_simulation(
     regrets = np.zeros(n_rounds)
     for round_index, customer in enumerate(customer_sequence):
         customer = int(customer)
-        context = simulator.context(customer)
+        full_context = simulator.context(customer)
+        context = full_context if feature_indices is None else full_context[feature_indices]
         eligible = simulator.eligible_actions(customer)
         action = agent.select_action(context, eligible)
         reward = simulator.step(customer, action, rng)
@@ -69,7 +75,10 @@ def run_simulation(
         expected[round_index] = simulator.expected_reward(customer, action)
         regrets[round_index] = simulator.best_expected_reward(customer) - expected[round_index]
     return SimulationResult(
-        agent_name=agent.name, rewards=rewards, expected_rewards=expected, regrets=regrets
+        agent_name=label or agent.name,
+        rewards=rewards,
+        expected_rewards=expected,
+        regrets=regrets,
     )
 
 

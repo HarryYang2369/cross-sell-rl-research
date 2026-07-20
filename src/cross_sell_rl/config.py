@@ -9,7 +9,7 @@ back to the defaults below, which match ``configs/default.yaml``.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -17,7 +17,13 @@ from typing import Any
 import yaml
 
 VALID_SOURCES = ("synthetic", "csv", "parquet", "databricks")
-VALID_REWARD_TYPES = ("conversion", "revenue")
+VALID_REWARD_TYPES = ("conversion", "revenue", "ape", "vnb")
+VALID_DELIVERY_MODES = ("assigned_agent", "mixed", "direct")
+
+# The feature group that describes the selling agent rather than the customer.
+# state.delivery controls whether it enters the state (direct sales have no
+# human intermediary, so agent quality cannot predict offer success there).
+AGENT_CONTEXT_GROUP = "agent_context"
 
 _DEFAULT_NUMERIC_FEATURES = ("age", "tenure_years", "annual_premium", "num_claims", "credit_score")
 _DEFAULT_CATEGORICAL_FEATURES = ("region", "acquisition_channel")
@@ -77,11 +83,75 @@ class DataConfig:
 class ProductsConfig:
     catalog: tuple[str, ...] = _DEFAULT_CATALOG
     premiums: Mapping[str, float] = _DEFAULT_PREMIUMS
+    ape: Mapping[str, float] = MappingProxyType({})
+    vnb: Mapping[str, float] = MappingProxyType({})
 
 
 @dataclass(frozen=True)
 class RewardConfig:
     type: str = "conversion"
+
+
+@dataclass(frozen=True)
+class FeatureGroupConfig:
+    """One named block of the state space (e.g. profile, holdings)."""
+
+    numeric: tuple[str, ...] = ()
+    categorical: tuple[str, ...] = ()
+    enabled: bool | None = None  # None -> on, except agent_context follows state.delivery
+
+
+@dataclass(frozen=True)
+class TrendConfig:
+    """A temporal trend feature: short-window activity relative to a long window."""
+
+    short: str
+    long: str
+
+
+@dataclass(frozen=True)
+class CoverageGapsConfig:
+    """Coverage-gap features: customer holdings vs. their segment's typical portfolio."""
+
+    segment_by: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class StateConfig:
+    """Grouped state-space definition (supersedes flat data.schema feature lists)."""
+
+    delivery: str = "mixed"
+    feature_groups: Mapping[str, FeatureGroupConfig] = MappingProxyType({})
+    trends: tuple[TrendConfig, ...] = ()
+    coverage_gaps: CoverageGapsConfig = field(default_factory=CoverageGapsConfig)
+
+    def group_enabled(self, name: str) -> bool:
+        group = self.feature_groups[name]
+        if group.enabled is not None:
+            return group.enabled
+        if name == AGENT_CONTEXT_GROUP:
+            return self.delivery in ("assigned_agent", "mixed")
+        return True
+
+    @property
+    def active_group_names(self) -> tuple[str, ...]:
+        return tuple(name for name in self.feature_groups if self.group_enabled(name))
+
+    @property
+    def active_numeric(self) -> tuple[str, ...]:
+        return tuple(
+            column
+            for name in self.active_group_names
+            for column in self.feature_groups[name].numeric
+        )
+
+    @property
+    def active_categorical(self) -> tuple[str, ...]:
+        return tuple(
+            column
+            for name in self.active_group_names
+            for column in self.feature_groups[name].categorical
+        )
 
 
 @dataclass(frozen=True)
@@ -110,6 +180,7 @@ class AppConfig:
     data: DataConfig = field(default_factory=DataConfig)
     products: ProductsConfig = field(default_factory=ProductsConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
+    state: StateConfig | None = None
     synthetic: SyntheticConfig = field(default_factory=SyntheticConfig)
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
@@ -127,16 +198,38 @@ def load_config(path: str | Path) -> AppConfig:
 
 def config_from_dict(raw: Mapping[str, Any]) -> AppConfig:
     """Build and validate a config from a YAML-shaped dictionary."""
+    state = _parse_state(_section(raw, "state"))
+    data = _parse_data(_section(raw, "data"))
+    if state is not None:
+        data = _apply_feature_groups(data, state)
     config = AppConfig(
-        data=_parse_data(_section(raw, "data")),
+        data=data,
         products=_parse_products(_section(raw, "products")),
         reward=_parse_reward(_section(raw, "reward")),
+        state=state,
         synthetic=_parse_synthetic(_section(raw, "synthetic")),
         environment=_parse_environment(_section(raw, "environment")),
         experiment=_parse_experiment(_section(raw, "experiment")),
     )
     _validate(config)
     return config
+
+
+def _apply_feature_groups(data: DataConfig, state: StateConfig) -> DataConfig:
+    """Assemble the flat schema feature lists from the active state groups."""
+    defaults = SchemaConfig()
+    _require(
+        data.schema.numeric_features == defaults.numeric_features
+        and data.schema.categorical_features == defaults.categorical_features,
+        "Feature columns are defined by state.feature_groups; leave "
+        "data.schema.numeric_features / categorical_features unset when using them",
+    )
+    schema = replace(
+        data.schema,
+        numeric_features=state.active_numeric,
+        categorical_features=state.active_categorical,
+    )
+    return replace(data, schema=schema)
 
 
 def _section(raw: Mapping[str, Any], key: str) -> Mapping[str, Any]:
@@ -187,10 +280,61 @@ def _parse_data(section: Mapping[str, Any]) -> DataConfig:
 def _parse_products(section: Mapping[str, Any]) -> ProductsConfig:
     defaults = ProductsConfig()
     catalog = _str_tuple(section.get("catalog", defaults.catalog), "products.catalog")
-    premiums_raw = section.get("premiums", defaults.premiums)
-    _require(isinstance(premiums_raw, Mapping), "'products.premiums' must be a mapping")
-    premiums = {str(product): float(value) for product, value in premiums_raw.items()}
-    return ProductsConfig(catalog=catalog, premiums=premiums)
+    return ProductsConfig(
+        catalog=catalog,
+        premiums=_value_map(section.get("premiums", defaults.premiums), "products.premiums"),
+        ape=_value_map(section.get("ape", {}), "products.ape"),
+        vnb=_value_map(section.get("vnb", {}), "products.vnb"),
+    )
+
+
+def _value_map(raw: Any, name: str) -> dict[str, float]:
+    _require(isinstance(raw, Mapping), f"'{name}' must be a mapping of product -> value")
+    return {str(product): float(value) for product, value in raw.items()}
+
+
+def _parse_state(section: Mapping[str, Any]) -> StateConfig | None:
+    if not section:
+        return None
+    groups_raw = section.get("feature_groups") or {}
+    _require(isinstance(groups_raw, Mapping), "'state.feature_groups' must be a mapping")
+    groups: dict[str, FeatureGroupConfig] = {}
+    for name, group_raw in groups_raw.items():
+        group_raw = group_raw or {}
+        _require(
+            isinstance(group_raw, Mapping),
+            f"Feature group '{name}' must be a mapping with numeric/categorical lists",
+        )
+        enabled = group_raw.get("enabled")
+        groups[str(name)] = FeatureGroupConfig(
+            numeric=_str_tuple(
+                group_raw.get("numeric", ()), f"state.feature_groups.{name}.numeric"
+            ),
+            categorical=_str_tuple(
+                group_raw.get("categorical", ()), f"state.feature_groups.{name}.categorical"
+            ),
+            enabled=None if enabled is None else bool(enabled),
+        )
+    trends_raw = section.get("trends") or []
+    _require(isinstance(trends_raw, (list, tuple)), "'state.trends' must be a list")
+    trends = []
+    for index, entry in enumerate(trends_raw):
+        _require(
+            isinstance(entry, Mapping) and "short" in entry and "long" in entry,
+            f"state.trends[{index}] must be a mapping with 'short' and 'long' column names",
+        )
+        trends.append(TrendConfig(short=str(entry["short"]), long=str(entry["long"])))
+    gaps_raw = section.get("coverage_gaps") or {}
+    _require(isinstance(gaps_raw, Mapping), "'state.coverage_gaps' must be a mapping")
+    coverage_gaps = CoverageGapsConfig(
+        segment_by=_str_tuple(gaps_raw.get("segment_by", ()), "state.coverage_gaps.segment_by")
+    )
+    return StateConfig(
+        delivery=str(section.get("delivery", "mixed")),
+        feature_groups=groups,
+        trends=tuple(trends),
+        coverage_gaps=coverage_gaps,
+    )
 
 
 def _parse_reward(section: Mapping[str, Any]) -> RewardConfig:
@@ -267,12 +411,21 @@ def _validate(config: AppConfig) -> None:
         config.reward.type in VALID_REWARD_TYPES,
         f"reward.type must be one of {VALID_REWARD_TYPES}, got '{config.reward.type}'",
     )
-    if config.reward.type == "revenue":
-        missing = [p for p in products.catalog if p not in products.premiums]
+    value_sources = {
+        "revenue": ("products.premiums", products.premiums),
+        "ape": ("products.ape", products.ape),
+        "vnb": ("products.vnb", products.vnb),
+    }
+    if config.reward.type in value_sources:
+        source_name, mapping = value_sources[config.reward.type]
+        missing = [p for p in products.catalog if p not in mapping]
         _require(
             not missing,
-            f"reward.type 'revenue' needs a premium for every product; missing: {missing}",
+            f"reward.type '{config.reward.type}' needs a {source_name} value for "
+            f"every product; missing: {missing}",
         )
+
+    _validate_state(config)
 
     _require(config.synthetic.n_customers > 0, "synthetic.n_customers must be positive")
     _require(
@@ -285,3 +438,61 @@ def _validate(config: AppConfig) -> None:
     )
     _require(config.experiment.n_rounds > 0, "experiment.n_rounds must be positive")
     _require(len(config.experiment.agents) > 0, "experiment.agents must list at least one agent")
+
+
+def _validate_state(config: AppConfig) -> None:
+    state = config.state
+    if state is None:
+        for label, params in config.experiment.agents.items():
+            _require(
+                "features" not in params,
+                f"Agent '{label}' sets 'features' but no state.feature_groups are configured",
+            )
+        return
+
+    _require(len(state.feature_groups) > 0, "state.feature_groups must define at least one group")
+    _require(
+        state.delivery in VALID_DELIVERY_MODES,
+        f"state.delivery must be one of {VALID_DELIVERY_MODES}, got '{state.delivery}'",
+    )
+    all_columns = [*state.active_numeric, *state.active_categorical]
+    duplicates = sorted({column for column in all_columns if all_columns.count(column) > 1})
+    _require(
+        not duplicates,
+        f"Columns listed in more than one active feature group (or as both numeric "
+        f"and categorical): {duplicates}",
+    )
+    numeric = set(state.active_numeric)
+    categorical = set(state.active_categorical)
+    for index, trend in enumerate(state.trends):
+        _require(
+            trend.short != trend.long,
+            f"state.trends[{index}] uses the same column for short and long windows",
+        )
+        for column in (trend.short, trend.long):
+            _require(
+                column in numeric,
+                f"state.trends[{index}] column '{column}' is not a numeric feature "
+                f"of any active group",
+            )
+    for column in state.coverage_gaps.segment_by:
+        _require(
+            column in categorical,
+            f"state.coverage_gaps.segment_by column '{column}' is not a categorical "
+            f"feature of any active group",
+        )
+    active_names = set(state.active_group_names)
+    for label, params in config.experiment.agents.items():
+        features = params.get("features")
+        if features is None:
+            continue
+        _require(
+            isinstance(features, (list, tuple)),
+            f"Agent '{label}': 'features' must be a list of feature-group names",
+        )
+        unknown = {str(name) for name in features} - active_names
+        _require(
+            not unknown,
+            f"Agent '{label}' references unknown or disabled feature groups "
+            f"{sorted(unknown)}; active groups: {sorted(active_names)}",
+        )

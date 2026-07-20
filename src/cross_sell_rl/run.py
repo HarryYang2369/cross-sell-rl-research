@@ -21,6 +21,7 @@ from cross_sell_rl.env import ConversionModel, CrossSellSimulator
 from cross_sell_rl.evaluation import run_simulation, summarize_results
 from cross_sell_rl.evaluation.plots import plot_learning_curves
 from cross_sell_rl.features import FeatureEncoder
+from cross_sell_rl.state import StateBuilder
 
 
 def build_simulator(
@@ -28,12 +29,18 @@ def build_simulator(
 ) -> CrossSellSimulator:
     """Assemble the simulated environment described by the config."""
     n_actions = len(config.products.catalog)
-    if config.reward.type == "revenue":
-        action_values = np.array(
-            [config.products.premiums[product] for product in config.products.catalog]
-        )
-    else:
+    if config.reward.type == "conversion":
         action_values = np.ones(n_actions)
+    else:
+        value_sources = {
+            "revenue": config.products.premiums,
+            "ape": config.products.ape,
+            "vnb": config.products.vnb,
+        }
+        mapping = value_sources[config.reward.type]
+        action_values = np.array(
+            [mapping[product] for product in config.products.catalog], dtype=float
+        )
     model = ConversionModel.sample(
         context_dim=contexts.shape[1],
         n_actions=n_actions,
@@ -63,8 +70,15 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     customers = load_customers(config)
-    encoder = FeatureEncoder(config.data.schema, config.products.catalog)
-    contexts = encoder.fit_transform(customers)
+    builder: StateBuilder | None = None
+    if config.state is not None:
+        builder = StateBuilder(config.data.schema, config.products.catalog, config.state)
+        contexts = builder.fit_transform(customers)
+        context_dim = builder.context_dim
+    else:
+        encoder = FeatureEncoder(config.data.schema, config.products.catalog)
+        contexts = encoder.fit_transform(customers)
+        context_dim = encoder.context_dim
     owned = ownership_matrix(customers, config.data.schema, config.products.catalog)
     simulator = build_simulator(config, contexts, owned)
 
@@ -72,7 +86,15 @@ def main(argv: list[str] | None = None) -> None:
         f"  customers: {len(customers)} loaded, "
         f"{simulator.n_customers} with at least one product to offer"
     )
-    print(f"  context vector: {encoder.context_dim} dimensions")
+    print(f"  context vector: {context_dim} dimensions")
+    if builder is not None:
+        state = config.state
+        n_gaps = len(config.products.catalog) if state.coverage_gaps.segment_by else 0
+        print(
+            f"  state: groups [{', '.join(state.active_group_names)}] "
+            f"(delivery: {state.delivery}) + {len(state.trends)} trend "
+            f"+ {n_gaps} coverage-gap features"
+        )
     print(
         f"  simulated environment: mean conversion probability "
         f"{simulator.mean_conversion_probability():.1%}, "
@@ -92,11 +114,19 @@ def main(argv: list[str] | None = None) -> None:
         f"{experiment.n_rounds:,} rounds each (same customer sequence for all)..."
     )
     results = []
-    for index, (name, params) in enumerate(experiment.agents.items()):
+    for index, (label, raw_params) in enumerate(experiment.agents.items()):
+        params = dict(raw_params)
+        agent_type = str(params.pop("type", label))
+        feature_groups = params.pop("features", None)
+        include_derived = bool(params.pop("derived", True))
+        feature_indices = None
+        if builder is not None and (feature_groups is not None or not include_derived):
+            feature_indices = builder.columns_for(feature_groups, include_derived)
+        agent_dim = context_dim if feature_indices is None else len(feature_indices)
         agent = create_agent(
-            name,
+            agent_type,
             n_actions=simulator.n_actions,
-            context_dim=encoder.context_dim,
+            context_dim=agent_dim,
             rng=np.random.default_rng([experiment.seed, index]),
             **params,
         )
@@ -106,10 +136,13 @@ def main(argv: list[str] | None = None) -> None:
             simulator,
             customer_sequence,
             rng=np.random.default_rng([experiment.seed, index, 1]),
+            feature_indices=feature_indices,
+            label=label,
         )
         elapsed = time.perf_counter() - started
         print(
-            f"  {name:<16} mean reward {result.mean_reward:.4f}   "
+            f"  {label:<12} ({agent_type}, {agent_dim} features)  "
+            f"mean reward {result.mean_reward:.4f}   "
             f"cumulative regret {result.cumulative_regret:9.1f}   ({elapsed:.1f}s)"
         )
         results.append(result)
