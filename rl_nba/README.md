@@ -153,6 +153,10 @@ rl_nba/                         this project
   examples/
     run_simulation.ipynb        run the whole simulation cell by cell
     playback_dashboard.html     interactive step-by-step episode playback (open in a browser)
+  docs/
+    customer_state_and_journey_model.md   customer states, journey, and full feature catalog
+    rl_project_spec_draft.md              initial project spec / requirements (draft)
+    RL_for_cross_sell_overview.pptx       concept slide deck
   src/rl_nba/
     config.py                   typed config loading + validation
     features.py                 FeatureEncoder: rows -> context vectors
