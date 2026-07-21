@@ -135,7 +135,7 @@ rl_nba/                         this project
     features.py                 FeatureEncoder: rows -> context vectors
     data/                       schema checks, synthetic generator, source-dispatching loader
     agents/                     BanditAgent interface, registry, 4 agents
-    env/simulator.py            hidden ground-truth conversion model + bandit environment
+    environment/simulator.py    hidden ground-truth conversion model + bandit environment
     evaluation/
       simulate.py               run agents, learning curves, regret, summary table
       ope.py                    IPS / SNIPS off-policy evaluation (ready for real logs)

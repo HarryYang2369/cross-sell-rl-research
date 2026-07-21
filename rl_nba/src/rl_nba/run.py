@@ -17,7 +17,7 @@ import numpy as np
 from rl_nba.agents import create_agent
 from rl_nba.config import AppConfig, load_config
 from rl_nba.data import load_customers, ownership_matrix
-from rl_nba.env import ConversionModel, CrossSellSimulator
+from rl_nba.environment import ConversionModel, CrossSellSimulator
 from rl_nba.evaluation import run_simulation, summarize_results
 from rl_nba.evaluation.plots import plot_learning_curves
 from rl_nba.features import FeatureEncoder

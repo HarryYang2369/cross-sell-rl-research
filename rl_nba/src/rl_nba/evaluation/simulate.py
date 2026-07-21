@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from rl_nba.agents.base import BanditAgent
-from rl_nba.env.simulator import CrossSellSimulator
+from rl_nba.environment.simulator import CrossSellSimulator
 
 
 @dataclass(frozen=True)

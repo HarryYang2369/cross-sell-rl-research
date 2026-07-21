@@ -15,7 +15,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from rl_nba.agents.base import BanditAgent
-from rl_nba.env.simulator import CrossSellSimulator
+from rl_nba.environment.simulator import CrossSellSimulator
 
 
 @dataclass(frozen=True)
