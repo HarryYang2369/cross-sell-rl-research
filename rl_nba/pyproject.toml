@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rl-nba"
+version = "0.1.0"
+description = "Config-driven contextual-bandit / RL pipeline for insurance cross-sell"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "pyyaml>=6.0",
+    "matplotlib>=3.8",
+    "pyarrow>=15.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.5",
+]
+
+[project.scripts]
+rl-nba = "rl_nba.run:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B", "SIM"]

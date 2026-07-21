@@ -1,0 +1,129 @@
+# =============================================================================
+# Cross-sell RL configuration — the single source of truth.
+#
+# Column names below mirror the real Databricks columns (normalized to
+# snake_case). While data.source is "synthetic" every column is generated with
+# a plausible distribution; when a real export lands, switch source to
+# csv/parquet and rename any column here to its exact production name
+# (e.g. wealth_segment -> "Tag-Final").
+#
+# Every key is optional and falls back to an in-code default, so you only need
+# to spell out what you want to override. The five design considerations map
+# onto config sections as:
+#   1. State space    -> state.feature_groups (+ state.delivery switch)
+#   2. Action space   -> products.catalog
+#   3. Reward         -> reward.type: conversion | ape | vnb
+#   4. Temporal       -> state.trends (short-window vs long-window ratios)
+#   5. Coverage gaps  -> state.coverage_gaps (holdings vs segment-typical portfolio)
+#
+# The experiment compares three models on identical customer sequences:
+#   random    -> the floor (uniform over eligible products)
+#   baseline  -> LinUCB on profile + holdings only
+#   enhanced  -> LinUCB on the full state incl. trend and coverage-gap features
+#
+# A simpler flat schema is also supported for quick experiments: drop the
+# `state:` block and instead list data.schema.numeric_features /
+# categorical_features directly. See config.py for that alternative.
+# =============================================================================
+
+data:
+  source: synthetic            # switch to csv/parquet + path for a real export
+  path: null
+  schema:
+    customer_id: customer_id
+    owned_product_prefix: has_ # expects 0/1 columns has_accident, has_medical, ...
+    # numeric/categorical lists are assembled from state.feature_groups below.
+
+state:
+  # Who delivers the offer: assigned_agent | mixed | direct.
+  # assigned_agent/mixed -> the servicing agent's quality enters the state
+  # (agent_context group); direct -> it is excluded automatically.
+  delivery: mixed
+
+  feature_groups:
+    profile:
+      numeric: [customer_age]
+      # customer_gender is compliance-sensitive in some jurisdictions:
+      # delete it from this list to excise it from the model entirely.
+      categorical: [customer_gender, customer_marital_status, customer_income_range,
+                    wealth_segment]   # wealth_segment maps to "Tag-Final"
+    holdings:
+      numeric: [customer_holdings_count, customer_holdings_ap,
+                customer_holdings_sum_assured, customer_inforce_policy_holding_ap,
+                customer_all_policy_holding_count]
+    behaviour:
+      numeric: [customer_purchase_count_past_1m, customer_purchase_count_past_3m,
+                customer_purchase_count_past_6m, customer_purchase_count_past_12m,
+                customer_purchased_ap_past_12m,
+                customer_lapsed_policy_count_past_12m,
+                customer_surrender_policy_count_past_12m]
+    channel:
+      numeric: [tied_agency_customer, bancassured_customer, brokers_customer]
+    engagement:
+      categorical: [voc_purchase, voc_service, voc_claim]
+    value_segment:
+      numeric: [customer_inforce_private_bmu_count, customer_inforce_maxfocus_bmu_count,
+                customer_inforced_wealthicon_value_usd]
+    agent_context:                       # follows state.delivery unless enabled is set
+      numeric: [agent_sales_count_past_12m, agent_sales_ap_past_12m,
+                agent_avg_sales_policy_count_past_12m, agent_policy_13m_lapse_rate,
+                agent_repurchase_count_past_6m]
+      categorical: [mdrt_label]
+
+  # 4. Temporal: is recent purchase pace above or below the customer's yearly pace?
+  trends:
+    - {short: customer_purchase_count_past_1m, long: customer_purchase_count_past_6m}
+    - {short: customer_purchase_count_past_3m, long: customer_purchase_count_past_12m}
+
+  # 5. Coverage gaps: which products do similar customers (same wealth segment
+  # and income band) typically hold that this customer does not?
+  coverage_gaps:
+    segment_by: [wealth_segment, customer_income_range]
+
+products:
+  # 2. Action space: one recommendation per product category. Non-exhaustive;
+  # extend freely — has_<category> columns and value tables follow along.
+  catalog: [accident, medical, saving, term_life, whole_life, investment, annuity]
+
+  # PLACEHOLDER value tables in HKD — replace with actuarial figures.
+  # ape: typical annual-premium-equivalent of a new policy in the category.
+  ape:
+    accident: 3000
+    medical: 9000
+    saving: 60000
+    term_life: 7000
+    whole_life: 45000
+    investment: 80000
+    annuity: 55000
+  # vnb: value of new business (profit margin view; protection-heavy products
+  # carry more VNB per premium dollar than savings/investment).
+  vnb:
+    accident: 1800
+    medical: 4500
+    saving: 9000
+    term_life: 4200
+    whole_life: 22500
+    investment: 8000
+    annuity: 16500
+
+reward:
+  # 3. Reward: conversion (1 per sale) | ape (premium volume) | vnb (economic value).
+  type: vnb
+
+synthetic:
+  n_customers: 6000
+  seed: 7
+
+environment:
+  base_conversion_rate: 0.05
+  context_influence: 1.4
+  seed: 2026
+
+experiment:
+  n_rounds: 30000
+  seed: 42
+  output_dir: rl_nba/results   # relative to the monorepo root (where you run from)
+  agents:
+    random: {}
+    baseline: {type: linucb, alpha: 1.0, features: [profile, holdings], derived: false}
+    enhanced: {type: linucb, alpha: 1.0}   # all active groups + trends + coverage gaps
