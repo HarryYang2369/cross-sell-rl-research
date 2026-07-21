@@ -91,6 +91,32 @@ class LinUCBAgent(BanditAgent):
             scores[action] = estimate + self.alpha * np.sqrt(max(variance, 0.0))
         return argmax_random_tiebreak(scores, self.rng)
 
+    def explain(
+        self, context: np.ndarray, eligible_actions: np.ndarray
+    ) -> list[dict[str, float]]:
+        """Per-action score breakdown: value ``estimate`` + exploration ``bonus``.
+
+        Introspection hook (used by playback). Mirrors :meth:`select_action`
+        exactly, so the action with the highest ``score`` is the one it picks —
+        the split between ``estimate`` (exploit) and ``bonus`` (explore) is what
+        makes the trade-off visible.
+        """
+        self._check_eligible(eligible_actions)
+        breakdown = []
+        for action in eligible_actions:
+            estimate = float(self._state.theta(action) @ context)
+            variance = float(context @ self._state.a_inv(action) @ context)
+            bonus = self.alpha * float(np.sqrt(max(variance, 0.0)))
+            breakdown.append(
+                {
+                    "action": int(action),
+                    "estimate": estimate,
+                    "bonus": bonus,
+                    "score": estimate + bonus,
+                }
+            )
+        return breakdown
+
     def update(self, context: np.ndarray, action: int, reward: float) -> None:
         self._state.update(action, context, reward)
 

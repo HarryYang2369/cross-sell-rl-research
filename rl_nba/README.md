@@ -123,6 +123,25 @@ schemas work end-to-end before you know your real column names.
 validated) but intentionally unimplemented until workspace credentials exist —
 the loader raises a clear message pointing at the csv/parquet route.
 
+## Examples
+
+- **`examples/run_simulation.ipynb`** — runs the whole simulation cell by cell.
+  It finds the project and config on its own and installs its own dependencies,
+  so you can just open it and Run All (needs a Python 3.11+ kernel).
+- **Playback dashboard** — an interactive, self-contained page for non-technical
+  viewers: step through one episode and watch the agent score each product (value
+  estimate + exploration bonus), make an offer, and learn. Serve it locally:
+
+  ```bash
+  python -m rl_nba.serve            # regenerates + serves http://127.0.0.1:8000
+  # rl-nba-dashboard --port 9000    # same thing, if the package is installed
+  ```
+
+  The command regenerates the page from the current config, serves it on
+  localhost (opening your browser), and stops on Ctrl+C. You can also open the
+  committed `examples/playback_dashboard.html` directly in a browser, or
+  regenerate the file with `rl_nba.playback.write_dashboard(config, path)`.
+
 ## Project layout
 
 ```
@@ -130,6 +149,10 @@ config/
   rl_nba_config.yml             this project's config (in the shared monorepo config folder)
 rl_nba/                         this project
   pyproject.toml                packaging — installs as `rl-nba`, entry point `rl_nba.run:main`
+  requirements.txt              runtime deps (mirrors pyproject), for pip / the notebook
+  examples/
+    run_simulation.ipynb        run the whole simulation cell by cell
+    playback_dashboard.html     interactive step-by-step episode playback (open in a browser)
   src/rl_nba/
     config.py                   typed config loading + validation
     features.py                 FeatureEncoder: rows -> context vectors
@@ -140,7 +163,8 @@ rl_nba/                         this project
       simulate.py               run agents, learning curves, regret, summary table
       ope.py                    IPS / SNIPS off-policy evaluation (ready for real logs)
       plots.py                  results figure
-    run.py                      CLI entry point
+    playback.py                 record an episode + render the playback dashboard
+    run.py                      CLI entry point (prepare / run / save pipeline)
 ```
 
 ## Roadmap
