@@ -1,0 +1,9 @@
+# Runtime dependencies for the rl_nba cross-sell simulation.
+# Mirrors the [project.dependencies] in pyproject.toml — install with:
+#     pip install -r requirements.txt
+# (The notebook examples/run_simulation.ipynb also installs these for you.)
+numpy>=1.26
+pandas>=2.1
+pyyaml>=6.0
+matplotlib>=3.8
+pyarrow>=15.0
