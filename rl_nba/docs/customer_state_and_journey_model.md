@@ -44,23 +44,40 @@ are in each, because the "next logical product" depends on both.
 
 ### 3.1 Life-stage states (the need-creating journey)
 
-These are driven by the customer's life, not by us. Each opens genuine new insurance needs.
+Classic life-stage map, but the **"Signals we could read" column is restricted to columns that actually
+exist in `config.yml`** — and lists *all* of them that contribute, so the column doubles as "what to
+read/record to place a customer in a stage."
 
-| Life-stage state | Typical age band | Needs it opens | Signals we could read |
+_Shorthand:_ `holdings_*` = the five size columns (`customer_holdings_count`, `_holdings_ap`,
+`_holdings_sum_assured`, `_all_policy_holding_count`, `customer_inforce_policy_holding_ap`);
+`purchase_count_*` = the four windows (`customer_purchase_count_past_1m/3m/6m/12m`);
+`wealth_flags` = `customer_inforce_private_bmu_count`, `_maxfocus_bmu_count`,
+`customer_inforced_wealthicon_value_usd`.
+
+| Life-stage state | Age band (`customer_age`) | Needs it opens (`products.catalog`) | Signals we could read (config columns only) |
 |---|---|---|---|
-| Young single / early career | 21–29 | Accident, basic medical, first savings | age, marital status, income band, no dependents |
-| Partnering / newly married | 25–35 | Life, critical illness, joint savings | marital-status change, beneficiary add |
-| New parents / family formation | 28–40 | Term life, education savings, family medical | dependents ↑, children age bands |
-| Established family / peak earning | 35–50 | Higher sum assured, whole life, investment | income growth, holdings AP ↑ |
-| Homeowner / mortgage | 30–50 | Mortgage protection, larger term life | homeowner/mortgage flag |
-| Business owner / self-employed | 30–55 | Keyman, liability, higher protection | employment status, industry |
-| Pre-retirement / accumulation | 50–62 | Annuity, retirement savings, wealth transfer | age, wealth segment, low dependents |
-| Retirement / decumulation | 62+ | Annuity payout, health/long-term care, legacy | age, retiree status |
-| Estate / legacy planning | 55+ (affluent) | Whole life, universal life, wealth products | wealth segment, BMU/WealthICON holdings |
-| Declining health / health event | any | Medical top-up, critical illness (if still eligible) | recent claims, claim type |
+| Young single / early career | 21–29 | accident, medical, first saving | `customer_marital_status`=single · `customer_income_range` 0–40k · `wealth_segment`=mass · `has_*`: none/accident/medical · `holdings_*` all low · `purchase_count_*` & `customer_purchased_ap_past_12m` low · lapse/surrender ≈ 0 · `wealth_flags` = 0 |
+| Newly married / partnering | 25–35 | term_life, medical, saving | `customer_marital_status`=married · `customer_income_range` 20–80k · `wealth_segment` mass→emerging · `has_accident/medical` · `holdings_*` low, rising (1–2) · `purchase_count_3m/6m` rising · `wealth_flags` = 0 |
+| New parents / young family | 28–40 | term_life, whole_life, saving, medical | `customer_marital_status`=married · `customer_income_range` 40–80k · `has_medical/term_life/saving` · `customer_holdings_count` 2–3, rising `customer_holdings_sum_assured` · **high `purchase_count_1m/3m/6m`** · `wealth_flags` = 0 |
+| Established family / peak earning | 38–52 | whole_life, investment, annuity, medical | `customer_income_range` 40–80k+ · `wealth_segment` emerging→affluent · `has_term_life/medical/saving/whole_life` · `holdings_*` all high (3–4) · steady `purchase_count_*`, high `customer_purchased_ap_past_12m` · lapse/surrender low · affluent: `customer_inforce_private_bmu_count` > 0 |
+| Affluent accumulator | 40–58 | investment, whole_life, annuity | `customer_income_range`=80k+ · `wealth_segment` affluent→HNW · `has_whole_life/investment/saving/medical` · high `customer_holdings_ap` / `customer_inforce_policy_holding_ap` (4–6) · active, high `customer_purchased_ap_past_12m` · **`wealth_flags` all > 0** |
+| Pre-retirement | 52–63 | annuity, saving, whole_life, medical | `customer_age` 52–63 · `wealth_segment` affluent→HNW · `has_whole_life/saving/investment/medical` · `holdings_*` high, `customer_holdings_sum_assured` plateauing · **`customer_purchase_count_past_12m` slowing** · **`customer_surrender_policy_count_past_12m` may rise** · `wealth_flags` present |
+| Retirement / decumulation | 63+ | annuity, medical, whole_life | `customer_income_range` drops to 0–40k · `has_annuity/whole_life/medical` · high `customer_inforce_policy_holding_ap` · low `purchase_count_*` · **`customer_surrender_policy_count_past_12m` elevated (drawdown)** · legacy holders show `wealth_flags` |
+| Legacy / estate (HNW) | 58+ | whole_life, investment, annuity | `wealth_segment`=high_net_worth · `customer_income_range`=80k+ · `has_whole_life/investment/annuity` · very high `holdings_*` · selective large `customer_purchased_ap_past_12m` · **`wealth_flags` all high** |
 
-> Many life-stage signals are **not directly observed today** (e.g. "just had a child"). Section 6,
-> Group K covers how we might infer or capture them.
+**Every config column is accounted for.** The 26 columns in the Signals column above are the ones that
+*discriminate* life stage. The other 13 are read for **every** customer but **do not vary by life stage**,
+so they shape *how/whether* to act rather than *which* stage someone is in — record them, just not as
+stage signals:
+
+- `customer_gender` — compliance-sensitive, weak stage signal.
+- `tied_agency_customer`, `bancassured_customer`, `brokers_customer` — the delivery channel.
+- `voc_purchase`, `voc_service`, `voc_claim` — satisfaction (drives timing / suppression).
+- `agent_sales_count_past_12m`, `agent_sales_ap_past_12m`, `agent_avg_sales_policy_count_past_12m`, `agent_policy_13m_lapse_rate`, `agent_repurchase_count_past_6m`, `mdrt_label` — the servicing agent.
+
+> Genuine stages we **can't** separate with today's config — homeowner/mortgage, business owner, health
+> event — need the "New" features in Section 6 (Groups A, E, K): `mortgage_flag`, `employment_status`,
+> claims columns.
 
 ### 3.2 Relationship-lifecycle states (with the insurer)
 
