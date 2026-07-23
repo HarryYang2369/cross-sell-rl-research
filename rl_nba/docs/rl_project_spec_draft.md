@@ -59,7 +59,7 @@ test, within agreed guardrails.
 | **Action** | One product category from the catalog (Phase 1); "hold" added later | `products.catalog` |
 | **Reward** | Value of the resulting purchase | `reward.type` |
 | **Constraints** | Eligibility, suitability, consent, contact-fatigue caps — applied *before* the policy chooses | (governance layer) |
-| **Method** | Contextual bandit (LinUCB / Thompson sampling) → sequential RL later | `experiment.agents` |
+| **Method** | Contextual bandit (LinUCB / RFF kernel / Thompson) → sequential RL later | `agent.type` |
 
 **[DECIDE] Reward definition.** Options: `conversion` (1/0), `APE` (premium volume), `VNB` (economic
 value). Recommendation: **VNB** so the engine optimizes profit, not volume — pending real VNB figures

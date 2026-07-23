@@ -118,7 +118,10 @@ class DToCWorld:
             frame = load_customers(config)
         if config.state is not None:
             encoder: StateBuilder | FeatureEncoder = StateBuilder(
-                config.data.schema, config.products.catalog, config.state
+                config.data.schema,
+                config.products.catalog,
+                config.state,
+                include_journey=config.dtoc.enabled,  # keep twin context == training context
             ).fit(frame)
         else:
             encoder = FeatureEncoder(config.data.schema, config.products.catalog).fit(frame)
@@ -128,6 +131,8 @@ class DToCWorld:
             base_conversion_rate=config.environment.base_conversion_rate,
             context_influence=config.environment.context_influence,
             rng=np.random.default_rng(config.environment.seed),
+            base_dim=encoder.context_dim - getattr(encoder, "n_journey", 0),
+            journey_influence=config.environment.journey_influence,
         )
         return cls(config, encoder, model, _action_values(config))
 

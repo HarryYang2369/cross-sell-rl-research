@@ -26,12 +26,10 @@ rl_nba/.venv/bin/python -m rl_nba.run --config config/rl_nba_config.yml
 ```
 
 The run prints a comparison table and writes `rl_nba/results/metrics.csv` and
-`rl_nba/results/learning_curves.png`. The shipped config compares three models —
-`random` (the floor), `baseline` (LinUCB on profile + holdings), and
-`enhanced` (LinUCB on the full state). You should see `enhanced` beat
-`baseline` beat `random`: the first gap is the value of personalization, the
-second is the value of the richer customer view (trend and coverage-gap
-signals).
+`rl_nba/results/learning_curves.png`. The shipped config uses `agent.type: all`, so it
+runs three models — `random` (the floor), `linucb` (linear contextual bandit), and
+`rff_ucb` (non-linear kernel bandit) — on identical customer sequences. You should see
+both learners beat `random` by a wide margin (the value of personalization).
 
 ## How it works
 
@@ -53,6 +51,13 @@ Agents implemented behind one `BanditAgent` interface:
 | `epsilon_greedy` | Classic context-free bandit — measures what you get *without* personalization. |
 | `linucb` | Per-product ridge regression + optimism bonus (Li et al. 2010). |
 | `lin_ts` | Linear Thompson Sampling — posterior sampling, often best in practice. |
+| `rff_ucb` | **Non-linear** kernel bandit: LinUCB on Random Fourier Features (captures interactions). |
+
+One `agent:` block selects the model: `type` (`random` / `linucb` / `rff_ucb` / `all`),
+`alpha` (exploration), `journey` (use the Digital-Twin journey features), and `n_features`
+(required for `rff_ucb` / `all`). `type: all` runs every model on identical draws (the harness
+uses common random numbers). To compare with vs without journey, run once with `journey: true`
+and once with `journey: false`.
 
 **What is real vs. simulated:** there are no real outcome logs yet, so
 customer *responses* come from a hidden ground-truth model (random per-product
@@ -81,16 +86,15 @@ the five design considerations onto config sections:
 servicing-agent quality features enter the state (direct sales have no human
 intermediary, so they are excluded automatically).
 
-Model entries carry a `type:` (algorithm) so the same algorithm can run under
-several labels with different state designs. `features:` restricts a model to
-selected groups and `derived: false` hides the trend/coverage-gap features —
-that is how the `baseline` and `enhanced` state designs compete fairly on
+The model is chosen with a single `agent:` block — `type: all` runs every model type on
 identical customer sequences:
 
 ```yaml
-agents:
-  baseline: {type: linucb, alpha: 1.0, features: [profile, holdings], derived: false}
-  enhanced: {type: linucb, alpha: 1.0}   # all active groups + derived features
+agent:
+  type: all         # random | linucb | rff_ucb | all
+  alpha: 1.0        # exploration (linucb / rff_ucb)
+  journey: true     # use the Digital-Twin journey features (needs dtoc.enabled)
+  n_features: 256   # RFF features — required for rff_ucb and 'all'
 ```
 
 **Simpler flat schema.** For quick experiments you can drop the `state:` block
@@ -129,18 +133,22 @@ the loader raises a clear message pointing at the csv/parquet route.
   It finds the project and config on its own and installs its own dependencies,
   so you can just open it and Run All (needs a Python 3.11+ kernel).
 - **Playback dashboard** — an interactive, self-contained page for non-technical
-  viewers: step through one episode and watch the agent score each product (value
-  estimate + exploration bonus), make an offer, and learn. Serve it locally:
+  viewers: step through one episode and watch the model score each product (value
+  estimate + exploration bonus), make an offer, and learn. By default it plays back
+  the **champion** — the best-performing model the config runs, chosen on the same
+  `metrics.csv` ranking (a header badge names it). Serve it locally:
 
   ```bash
-  python -m rl_nba.serve            # regenerates + serves http://127.0.0.1:8000
-  # rl-nba-dashboard --port 9000    # same thing, if the package is installed
+  python -m rl_nba.serve                 # champion of the config's models, on :8000
+  python -m rl_nba.serve --model linucb  # or pin a specific model to display
+  # rl-nba-dashboard --port 9000         # console script, if the package is installed
   ```
 
   The command regenerates the page from the current config, serves it on
-  localhost (opening your browser), and stops on Ctrl+C. You can also open the
-  committed `examples/playback_dashboard.html` directly in a browser, or
-  regenerate the file with `rl_nba.playback.write_dashboard(config, path)`.
+  localhost (opening your browser), and stops on Ctrl+C. With `agent.type: all` it
+  runs the comparison first to identify the champion (a few seconds); a single
+  `agent.type` is played directly. Regenerate the file yourself with
+  `rl_nba.playback.write_dashboard(config, path, model="champion")`.
 
 ## Project layout
 
@@ -191,10 +199,12 @@ twin.project(trained_agent)       # future_mode: simulate -> scenario roll-out
 twin.explain(trained_agent)       # per-product value + exploration bonus (why this offer)
 ```
 
-Toggle the whole layer with **`dtoc.enabled`**: `true` uses the DToC; `false` runs in plain
-feature-vector mode (as before the DToC — building a twin then raises a clear error). Training uses the
-feature vector either way; the flag only gates the twin layer. `dtoc.future_mode` (when enabled) switches
-future-state projection on (`simulate`) or off (`placeholder`).
+**`dtoc.enabled`** actually changes training: `true` folds the journey model into the state (models train
+on `life_stage` + `relationship_stage`) and makes twins available; `false` is the plain feature-vector
+pipeline (building a twin then errors). Run `agent.journey: true` vs `false` to isolate the journey
+features' value — ≈ neutral at the default `environment.journey_influence`, but a clear win (+14% for
+`linucb`) when journey genuinely drives behaviour (see `docs/digital_twin_of_customer.md` §5).
+`dtoc.future_mode` switches future-state projection on (`simulate`) or off (`placeholder`).
 
 ## Roadmap
 

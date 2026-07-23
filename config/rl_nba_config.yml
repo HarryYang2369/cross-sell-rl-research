@@ -16,10 +16,11 @@
 #   4. Temporal       -> state.trends (short-window vs long-window ratios)
 #   5. Coverage gaps  -> state.coverage_gaps (holdings vs segment-typical portfolio)
 #
-# The experiment compares three models on identical customer sequences:
-#   random    -> the floor (uniform over eligible products)
-#   baseline  -> LinUCB on profile + holdings only
-#   enhanced  -> LinUCB on the full state incl. trend and coverage-gap features
+# The `agent:` block picks the model to train (or `type: all` for every model).
+# With `type: all` the run compares, on identical customer sequences:
+#   random   -> the floor (uniform over eligible products)
+#   linucb   -> linear contextual bandit
+#   rff_ucb  -> non-linear (kernel) contextual bandit
 #
 # A simpler flat schema is also supported for quick experiments: drop the
 # `state:` block and instead list data.schema.numeric_features /
@@ -118,21 +119,32 @@ environment:
   base_conversion_rate: 0.05
   context_influence: 1.4
   seed: 2026
+  # How strongly journey stage drives behaviour in the simulated world, as a
+  # multiple of the base per-feature weight. 1.0 = journey is redundant (our
+  # honest finding). Higher simulates a world where journey genuinely matters —
+  # then journey features help linear models and non-linear models recover the
+  # effect from raw features. Only active when dtoc.enabled adds the journey block.
+  journey_influence: 8.0
+
+# The model to train.
+agent:
+  type: all         # random | linucb | rff_ucb | all   (all = run every model type)
+  alpha: 1.0        # exploration strength (linucb / rff_ucb; ignored by random)
+  journey: true     # use the Digital-Twin journey features (needs dtoc.enabled to take effect)
+  n_features: 256   # RFF random features — REQUIRED for rff_ucb and for 'all'; ignored otherwise
+  # To compare with vs without journey, run twice: journey: true, then journey: false.
 
 experiment:
   n_rounds: 30000
   seed: 42
   output_dir: rl_nba/results   # relative to the monorepo root (where you run from)
-  agents:
-    random: {}
-    baseline: {type: linucb, alpha: 1.0, features: [profile, holdings], derived: false}
-    enhanced: {type: linucb, alpha: 1.0}   # all active groups + trends + coverage gaps
 
 # Digital Twin of Customer (DToC) layer.
 dtoc:
-  # true  -> DToC layer available (twins for scenario / visualization / explainability)
-  # false -> plain feature-vector mode, as before the DToC (building a twin then errors).
-  #          Training uses the feature vector either way; this only gates the twin layer.
+  # true  -> fold the journey model into the STATE (models train on life_stage +
+  #          relationship_stage) AND make the twin layer available (scenario / viz / explain).
+  #          Compare with vs without by running agent.journey: true then false.
+  # false -> plain feature-vector pipeline, as before the DToC (building a twin then errors).
   enabled: true
   # future-state handling (only when enabled):
   #   simulate    -> project the customer forward under a policy (scenario what-ifs)

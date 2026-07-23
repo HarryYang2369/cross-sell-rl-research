@@ -21,6 +21,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -39,9 +40,14 @@ AgentCallback = Callable[[str, str, int, SimulationResult, float], None]
 
 
 def build_simulator(
-    config: AppConfig, contexts: np.ndarray, owned: np.ndarray
+    config: AppConfig, contexts: np.ndarray, owned: np.ndarray, journey_dim: int = 0
 ) -> CrossSellSimulator:
-    """Assemble the simulated environment described by the config."""
+    """Assemble the simulated environment described by the config.
+
+    ``journey_dim`` marks how many trailing context columns are Digital-Twin
+    journey features; the ground-truth model draws its base weights independently
+    of them, so toggling journey does not change the base world.
+    """
     n_actions = len(config.products.catalog)
     if config.reward.type == "conversion":
         action_values = np.ones(n_actions)
@@ -61,6 +67,8 @@ def build_simulator(
         base_conversion_rate=config.environment.base_conversion_rate,
         context_influence=config.environment.context_influence,
         rng=np.random.default_rng(config.environment.seed),
+        base_dim=contexts.shape[1] - journey_dim,
+        journey_influence=config.environment.journey_influence,
     )
     return CrossSellSimulator(contexts, owned, model, action_values)
 
@@ -75,7 +83,12 @@ def build_contexts(
     flat schema, which has no feature groups to mask on).
     """
     if config.state is not None:
-        builder = StateBuilder(config.data.schema, config.products.catalog, config.state)
+        builder = StateBuilder(
+            config.data.schema,
+            config.products.catalog,
+            config.state,
+            include_journey=config.dtoc.enabled,  # DToC journey model feeds the state
+        )
         return builder.fit_transform(customers), builder.context_dim, builder
     encoder = FeatureEncoder(config.data.schema, config.products.catalog)
     contexts = encoder.fit_transform(customers)
@@ -140,7 +153,8 @@ def prepare_experiment(config: AppConfig) -> PreparedExperiment:
     customers = load_customers(config)
     contexts, context_dim, builder = build_contexts(config, customers)
     owned = ownership_matrix(customers, config.data.schema, config.products.catalog)
-    simulator = build_simulator(config, contexts, owned)
+    journey_dim = builder.n_journey if isinstance(builder, StateBuilder) else 0
+    simulator = build_simulator(config, contexts, owned, journey_dim=journey_dim)
     customer_sequence = np.random.default_rng(config.experiment.seed).integers(
         0, simulator.n_customers, size=config.experiment.n_rounds
     )
@@ -157,31 +171,38 @@ def prepare_experiment(config: AppConfig) -> PreparedExperiment:
 def run_agents(
     prepared: PreparedExperiment, on_agent: AgentCallback | None = None
 ) -> list[SimulationResult]:
-    """Run every configured agent against the same customer sequence.
+    """Run the configured model — or every model type when ``agent.type: all``.
 
-    Each agent may restrict itself to a subset of feature groups (``features``)
-    and drop the derived trend/coverage-gap columns (``derived: false``); this
-    is how baseline and enhanced state designs compete fairly. Pass ``on_agent``
-    to receive live per-agent progress.
+    ``agent.journey: false`` masks the Digital-Twin journey block off; the
+    harness uses common random numbers, so every model faces the *same*
+    conversion draws and the comparison is a clean A/B. Pass ``on_agent`` for
+    live per-model progress.
     """
     config = prepared.config
-    experiment = config.experiment
+    agent_cfg = config.agent
     builder = prepared.builder
+    seed = config.experiment.seed
+
+    # journey off -> drop the journey one-hot block from what the model sees
+    # (only meaningful when the state has one; random ignores features regardless).
+    journey_masked_indices = None
+    if builder is not None and not agent_cfg.journey:
+        journey_masked_indices = builder.columns_for(include_journey=False)
+
     results: list[SimulationResult] = []
-    for index, (label, raw_params) in enumerate(experiment.agents.items()):
-        params = dict(raw_params)
-        agent_type = str(params.pop("type", label))
-        feature_groups = params.pop("features", None)
-        include_derived = bool(params.pop("derived", True))
-        feature_indices = None
-        if builder is not None and (feature_groups is not None or not include_derived):
-            feature_indices = builder.columns_for(feature_groups, include_derived)
+    for agent_type in agent_cfg.types_to_run:
+        params: dict[str, Any] = {}
+        if agent_type in ("linucb", "rff_ucb"):
+            params["alpha"] = agent_cfg.alpha
+        if agent_type == "rff_ucb":
+            params["n_features"] = agent_cfg.n_features
+        feature_indices = None if agent_type == "random" else journey_masked_indices
         agent_dim = prepared.context_dim if feature_indices is None else len(feature_indices)
         agent = create_agent(
             agent_type,
             n_actions=prepared.simulator.n_actions,
             context_dim=agent_dim,
-            rng=np.random.default_rng([experiment.seed, index]),
+            rng=np.random.default_rng([seed, 101]),
             **params,
         )
         started = time.perf_counter()
@@ -189,12 +210,12 @@ def run_agents(
             agent,
             prepared.simulator,
             prepared.customer_sequence,
-            rng=np.random.default_rng([experiment.seed, index, 1]),
+            rng=np.random.default_rng([seed, 202]),
             feature_indices=feature_indices,
-            label=label,
+            label=agent_type,
         )
         if on_agent is not None:
-            on_agent(label, agent_type, agent_dim, result, time.perf_counter() - started)
+            on_agent(agent_type, agent_type, agent_dim, result, time.perf_counter() - started)
         results.append(result)
     return results
 
@@ -273,7 +294,8 @@ def main(argv: list[str] | None = None) -> None:
     prepared = prepare_experiment(config)
     describe(prepared)
     print(
-        f"\nRunning {len(config.experiment.agents)} agents for "
+        f"\nRunning model(s) [{config.agent.type}] "
+        f"({len(config.agent.types_to_run)}) for "
         f"{config.experiment.n_rounds:,} rounds each (same customer sequence for all)..."
     )
 

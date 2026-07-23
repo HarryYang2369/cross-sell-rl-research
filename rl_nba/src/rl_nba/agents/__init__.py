@@ -9,16 +9,23 @@ import numpy as np
 from rl_nba.agents.base import BanditAgent
 from rl_nba.agents.epsilon_greedy import EpsilonGreedyAgent
 from rl_nba.agents.linear import LinTSAgent, LinUCBAgent
+from rl_nba.agents.nonlinear import RFFLinUCBAgent
 from rl_nba.agents.random_agent import RandomAgent
 
 _REGISTRY: dict[str, type[BanditAgent]] = {
     agent_class.name: agent_class
-    for agent_class in (RandomAgent, EpsilonGreedyAgent, LinUCBAgent, LinTSAgent)
+    for agent_class in (
+        RandomAgent,
+        EpsilonGreedyAgent,
+        LinUCBAgent,
+        LinTSAgent,
+        RFFLinUCBAgent,
+    )
 }
 
 
 def available_agents() -> list[str]:
-    """Registry names accepted in the ``experiment.agents`` config section."""
+    """Registry names accepted as ``agent.type`` in the config."""
     return sorted(_REGISTRY)
 
 
@@ -48,6 +55,7 @@ __all__ = [
     "EpsilonGreedyAgent",
     "LinTSAgent",
     "LinUCBAgent",
+    "RFFLinUCBAgent",
     "RandomAgent",
     "available_agents",
     "create_agent",

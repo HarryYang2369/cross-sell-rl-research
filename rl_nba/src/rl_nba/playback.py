@@ -15,12 +15,21 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from rl_nba.agents.linear import LinUCBAgent
+from rl_nba.agents import create_agent
 from rl_nba.config import AppConfig
 from rl_nba.data import ownership_matrix
-from rl_nba.run import prepare_experiment
+from rl_nba.run import prepare_experiment, run_experiment
 
 _TEMPLATE = Path(__file__).with_name("_playback_template.html")
+
+# Friendly display names for the model shown on the dashboard.
+_MODEL_LABELS: dict[str, str] = {
+    "random": "Random (floor)",
+    "epsilon_greedy": "ε-greedy",
+    "linucb": "LinUCB (linear)",
+    "lin_ts": "Thompson sampling",
+    "rff_ucb": "RFF-UCB (non-linear)",
+}
 
 # Human-readable labels for the customer attributes worth showing, in display
 # order. Only columns actually present in the data are shown, so this is safe
@@ -48,16 +57,49 @@ def _pretty_product(product: str) -> str:
     return product.replace("_", " ")
 
 
+def champion_type(config: AppConfig) -> str:
+    """Identify the champion: the highest mean-reward model type the config runs.
+
+    A single ``agent.type`` is trivially its own champion — returned without a
+    comparison. ``agent.type: all`` runs the full comparison and returns the
+    winner (``summarize_results`` orders best mean reward first). It uses the
+    config's own ``experiment.n_rounds`` — *not* a shortened run — so the
+    dashboard's champion matches the one in ``metrics.csv``: the model ranking
+    can cross over with horizon (a fast learner leads early, a richer model wins
+    later), and picking at a different round count would name a different model.
+    """
+    types = config.agent.types_to_run
+    if len(types) == 1:
+        return types[0]
+    print(
+        f"Identifying champion among {list(types)} "
+        f"({config.experiment.n_rounds:,} rounds each; this takes a moment)..."
+    )
+    outcome = run_experiment(config)
+    winner = str(outcome.summary.iloc[0]["agent"])
+    print(f"  champion: {winner}")
+    return winner
+
+
 def record_playback(
     config: AppConfig,
+    model: str = "champion",
     n_steps: int = 150,
-    alpha: float = 1.0,
     seed: int = 20260721,
 ) -> dict[str, Any]:
-    """Run the enhanced (full-state LinUCB) agent and record ``n_steps`` decisions.
+    """Record ``n_steps`` decisions of one model for the playback dashboard.
+
+    ``model`` chooses which model plays back: ``"champion"`` (the best-performing
+    type the config runs — see :func:`champion_type`) or an explicit type name
+    (e.g. ``"linucb"`` / ``"rff_ucb"``). The model is built with the config's
+    ``agent`` settings (``alpha``, ``n_features``) and the same journey masking it
+    trains under, so the trace matches how that model actually learns.
 
     Returns a JSON-serializable dict with ``meta`` and a list of ``steps``.
     """
+    is_champion = model in (None, "champion")
+    model_type = champion_type(config) if is_champion else str(model)
+
     prepared = prepare_experiment(config)
     simulator = prepared.simulator
     schema, catalog = config.data.schema, config.products.catalog
@@ -67,12 +109,34 @@ def record_playback(
     offerable = prepared.customers[offerable_mask].reset_index(drop=True)
     offerable_owned = owned[offerable_mask]
 
-    agent = LinUCBAgent(
+    # Journey masking, identical to training: drop the journey block when this
+    # model runs with agent.journey: false (never for random, which ignores it).
+    feature_indices = None
+    if (
+        prepared.builder is not None
+        and not config.agent.journey
+        and model_type != "random"
+    ):
+        feature_indices = prepared.builder.columns_for(include_journey=False)
+
+    def agent_view(context: np.ndarray) -> np.ndarray:
+        return context if feature_indices is None else context[feature_indices]
+
+    params: dict[str, Any] = {}
+    if model_type in ("linucb", "rff_ucb"):
+        params["alpha"] = config.agent.alpha
+    if model_type == "rff_ucb":
+        params["n_features"] = config.agent.n_features
+    agent_dim = prepared.context_dim if feature_indices is None else len(feature_indices)
+    agent = create_agent(
+        model_type,
         n_actions=simulator.n_actions,
-        context_dim=prepared.context_dim,
+        context_dim=agent_dim,
         rng=np.random.default_rng(seed),
-        alpha=alpha,
+        **params,
     )
+    # Only value-based agents expose an estimate/bonus split; random does not.
+    can_explain = hasattr(agent, "explain")
     env_rng = np.random.default_rng(seed + 1)
 
     n_steps = min(n_steps, len(prepared.customer_sequence))
@@ -84,12 +148,20 @@ def record_playback(
     for step in range(n_steps):
         customer = int(prepared.customer_sequence[step])
         context = simulator.context(customer)
+        view = agent_view(context)
         eligible = simulator.eligible_actions(customer)
 
-        breakdown = agent.explain(context, eligible)
-        chosen = max(breakdown, key=lambda item: item["score"])["action"]
+        if can_explain:
+            breakdown = agent.explain(view, eligible)
+            chosen = max(breakdown, key=lambda item: item["score"])["action"]
+        else:
+            chosen = agent.select_action(view, eligible)
+            breakdown = [
+                {"action": int(action), "estimate": 0.0, "bonus": 0.0, "score": 0.0}
+                for action in eligible
+            ]
         reward = simulator.step(customer, chosen, env_rng)
-        agent.update(context, chosen, reward)
+        agent.update(view, chosen, reward)
 
         converted = reward > 0.0
         conversions += int(converted)
@@ -140,7 +212,11 @@ def record_playback(
             ),
             "products": [_pretty_product(product) for product in catalog],
             "n_steps": n_steps,
-            "alpha": alpha,
+            "model": model_type,
+            "model_label": _MODEL_LABELS.get(model_type, model_type),
+            "is_champion": bool(is_champion),
+            "journey": bool(config.agent.journey and feature_indices is None),
+            "alpha": config.agent.alpha,
         },
         "steps": steps,
     }
@@ -165,12 +241,12 @@ def render_dashboard(trace: dict[str, Any]) -> str:
 def write_dashboard(
     config: AppConfig,
     out_path: str | Path,
+    model: str = "champion",
     n_steps: int = 150,
-    alpha: float = 1.0,
     seed: int = 20260721,
 ) -> Path:
-    """Record an episode and write a self-contained playback dashboard."""
-    trace = record_playback(config, n_steps=n_steps, alpha=alpha, seed=seed)
+    """Record an episode of the chosen model and write the playback dashboard."""
+    trace = record_playback(config, model=model, n_steps=n_steps, seed=seed)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(render_dashboard(trace), encoding="utf-8")

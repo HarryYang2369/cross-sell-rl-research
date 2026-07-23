@@ -21,6 +21,7 @@ VALID_SOURCES = ("synthetic", "csv", "parquet", "databricks")
 VALID_REWARD_TYPES = ("conversion", "revenue", "ape", "vnb")
 VALID_DELIVERY_MODES = ("assigned_agent", "mixed", "direct")
 VALID_FUTURE_MODES = ("simulate", "placeholder")
+VALID_AGENT_TYPES = ("random", "linucb", "rff_ucb", "all")
 
 # The feature group that describes the selling agent rather than the customer.
 # state.delivery controls whether it enters the state (direct sales have no
@@ -33,16 +34,6 @@ _DEFAULT_CATALOG = ("home", "life", "health", "travel", "pet")
 _DEFAULT_PREMIUMS: Mapping[str, float] = MappingProxyType(
     {"home": 950.0, "life": 620.0, "health": 1400.0, "travel": 180.0, "pet": 320.0}
 )
-_DEFAULT_AGENTS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
-    {
-        "random": MappingProxyType({}),
-        "epsilon_greedy": MappingProxyType({"epsilon": 0.1}),
-        "linucb": MappingProxyType({"alpha": 1.0}),
-        "lin_ts": MappingProxyType({"scale": 0.3}),
-    }
-)
-
-
 class ConfigError(ValueError):
     """Raised when the config file is missing, malformed, or inconsistent."""
 
@@ -167,6 +158,11 @@ class EnvironmentConfig:
     base_conversion_rate: float = 0.06
     context_influence: float = 1.4
     seed: int = 2026
+    # Strength of the journey block's effect in the (simulated) ground truth, as a
+    # multiple of the base per-feature weight scale. 1.0 = journey matters like any
+    # feature (largely redundant); higher = a world where journey stage genuinely
+    # drives behaviour (only meaningful when dtoc.enabled adds the journey block).
+    journey_influence: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -174,7 +170,25 @@ class ExperimentConfig:
     n_rounds: int = 30000
     seed: int = 42
     output_dir: str = "results"
-    agents: Mapping[str, Mapping[str, Any]] = _DEFAULT_AGENTS
+
+
+@dataclass(frozen=True)
+class AgentConfig:
+    """The model to train. ``type: all`` runs every model type; any other value
+    runs that single model. ``alpha`` (exploration strength) applies to
+    ``linucb`` / ``rff_ucb``; ``journey`` toggles the Digital-Twin journey
+    features; ``n_features`` is required for ``rff_ucb`` (and ``all``) and
+    ignored by the other types.
+    """
+
+    type: str = "linucb"
+    alpha: float = 1.0
+    journey: bool = True
+    n_features: int | None = None
+
+    @property
+    def types_to_run(self) -> tuple[str, ...]:
+        return ("random", "linucb", "rff_ucb") if self.type == "all" else (self.type,)
 
 
 @dataclass(frozen=True)
@@ -204,6 +218,7 @@ class AppConfig:
     products: ProductsConfig = field(default_factory=ProductsConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
     state: StateConfig | None = None
+    agent: AgentConfig = field(default_factory=AgentConfig)
     synthetic: SyntheticConfig = field(default_factory=SyntheticConfig)
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
@@ -231,6 +246,7 @@ def config_from_dict(raw: Mapping[str, Any]) -> AppConfig:
         products=_parse_products(_section(raw, "products")),
         reward=_parse_reward(_section(raw, "reward")),
         state=state,
+        agent=_parse_agent(_section(raw, "agent")),
         synthetic=_parse_synthetic(_section(raw, "synthetic")),
         environment=_parse_environment(_section(raw, "environment")),
         experiment=_parse_experiment(_section(raw, "experiment")),
@@ -392,26 +408,27 @@ def _parse_environment(section: Mapping[str, Any]) -> EnvironmentConfig:
         ),
         context_influence=float(section.get("context_influence", defaults.context_influence)),
         seed=int(section.get("seed", defaults.seed)),
+        journey_influence=float(section.get("journey_influence", defaults.journey_influence)),
     )
 
 
 def _parse_experiment(section: Mapping[str, Any]) -> ExperimentConfig:
     defaults = ExperimentConfig()
-    agents_raw = section.get("agents", defaults.agents)
-    _require(isinstance(agents_raw, Mapping), "'experiment.agents' must be a mapping")
-    agents: dict[str, dict[str, Any]] = {}
-    for name, params in agents_raw.items():
-        params = params or {}
-        _require(
-            isinstance(params, Mapping),
-            f"Parameters for agent '{name}' must be a mapping, got {type(params).__name__}",
-        )
-        agents[str(name)] = dict(params)
     return ExperimentConfig(
         n_rounds=int(section.get("n_rounds", defaults.n_rounds)),
         seed=int(section.get("seed", defaults.seed)),
         output_dir=str(section.get("output_dir", defaults.output_dir)),
-        agents=agents,
+    )
+
+
+def _parse_agent(section: Mapping[str, Any]) -> AgentConfig:
+    defaults = AgentConfig()
+    n_features = section.get("n_features")
+    return AgentConfig(
+        type=str(section.get("type", defaults.type)),
+        alpha=float(section.get("alpha", defaults.alpha)),
+        journey=bool(section.get("journey", defaults.journey)),
+        n_features=None if n_features is None else int(n_features),
     )
 
 
@@ -472,7 +489,21 @@ def _validate(config: AppConfig) -> None:
         "environment.context_influence must be non-negative",
     )
     _require(config.experiment.n_rounds > 0, "experiment.n_rounds must be positive")
-    _require(len(config.experiment.agents) > 0, "experiment.agents must list at least one agent")
+    _require(
+        config.environment.journey_influence >= 0.0,
+        "environment.journey_influence must be non-negative",
+    )
+    agent = config.agent
+    _require(
+        agent.type in VALID_AGENT_TYPES,
+        f"agent.type must be one of {VALID_AGENT_TYPES}, got '{agent.type}'",
+    )
+    _require(agent.alpha >= 0.0, "agent.alpha must be non-negative")
+    if agent.type in ("rff_ucb", "all"):
+        _require(
+            agent.n_features is not None and agent.n_features > 0,
+            f"agent.n_features is required and must be positive when agent.type is '{agent.type}'",
+        )
 
     _require(
         config.dtoc.future_mode in VALID_FUTURE_MODES,
@@ -485,11 +516,6 @@ def _validate(config: AppConfig) -> None:
 def _validate_state(config: AppConfig) -> None:
     state = config.state
     if state is None:
-        for label, params in config.experiment.agents.items():
-            _require(
-                "features" not in params,
-                f"Agent '{label}' sets 'features' but no state.feature_groups are configured",
-            )
         return
 
     _require(len(state.feature_groups) > 0, "state.feature_groups must define at least one group")
@@ -522,19 +548,4 @@ def _validate_state(config: AppConfig) -> None:
             column in categorical,
             f"state.coverage_gaps.segment_by column '{column}' is not a categorical "
             f"feature of any active group",
-        )
-    active_names = set(state.active_group_names)
-    for label, params in config.experiment.agents.items():
-        features = params.get("features")
-        if features is None:
-            continue
-        _require(
-            isinstance(features, (list, tuple)),
-            f"Agent '{label}': 'features' must be a list of feature-group names",
-        )
-        unknown = {str(name) for name in features} - active_names
-        _require(
-            not unknown,
-            f"Agent '{label}' references unknown or disabled feature groups "
-            f"{sorted(unknown)}; active groups: {sorted(active_names)}",
         )

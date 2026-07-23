@@ -10,7 +10,11 @@ fairly within a single experiment.
 Layout of the full context matrix::
 
     [ base encoding (intercept | numerics | one-hots | ownership flags)
-      | trend ratios | coverage gaps ]
+      | trend ratios | coverage gaps | journey one-hots (Digital Twin, optional) ]
+
+The journey block (``life_stage`` + ``relationship_stage`` one-hots) is added
+only when ``include_journey`` is set — i.e. when ``dtoc.enabled`` is true — so
+the Digital Twin's journey model becomes part of the state the policy learns on.
 """
 
 from __future__ import annotations
@@ -23,6 +27,11 @@ import pandas as pd
 from rl_nba.config import SchemaConfig, StateConfig, TrendConfig
 from rl_nba.data.schema import ownership_matrix
 from rl_nba.features import FeatureEncoder, NotFittedError
+from rl_nba.journey import LIFE_STAGES, RELATIONSHIP_STAGES, infer_journey
+
+_LIFE_IDX = {stage: index for index, stage in enumerate(LIFE_STAGES)}
+_REL_IDX = {stage: index for index, stage in enumerate(RELATIONSHIP_STAGES)}
+_N_JOURNEY = len(LIFE_STAGES) + len(RELATIONSHIP_STAGES)
 
 
 class StateBuilder:
@@ -39,11 +48,13 @@ class StateBuilder:
         products: Sequence[str],
         state: StateConfig,
         min_segment_size: int = 20,
+        include_journey: bool = False,
     ) -> None:
         self.schema = schema
         self.products = tuple(products)
         self.state = state
         self.min_segment_size = min_segment_size
+        self.include_journey = include_journey
         self._encoder = FeatureEncoder(schema, products)
         self._trend_means: dict[str, float] = {}
         self._trend_stds: dict[str, float] = {}
@@ -91,7 +102,19 @@ class StateBuilder:
                 [self._segment_rates.get(key, self._global_rates) for key in keys]
             )
             blocks.append(rates - owned)
+        if self.include_journey:
+            blocks.append(self._journey_block(frame))
         return np.hstack(blocks)
+
+    def _journey_block(self, frame: pd.DataFrame) -> np.ndarray:
+        """One-hot of the standardized journey state (life stage + relationship stage)."""
+        block = np.zeros((len(frame), _N_JOURNEY))
+        prefix = self.schema.owned_product_prefix
+        for row, record in enumerate(frame.to_dict("records")):
+            journey = infer_journey(record, self.products, prefix)
+            block[row, _LIFE_IDX[journey.life_stage]] = 1.0
+            block[row, len(LIFE_STAGES) + _REL_IDX[journey.relationship_stage]] = 1.0
+        return block
 
     def fit_transform(self, frame: pd.DataFrame) -> np.ndarray:
         return self.fit(frame).transform(frame)
@@ -104,20 +127,34 @@ class StateBuilder:
         names.extend(_trend_name(trend) for trend in self.state.trends)
         if self.state.coverage_gaps.segment_by:
             names.extend(f"coverage_gap_{product}" for product in self.products)
+        if self.include_journey:
+            names.extend(f"life_stage={stage}" for stage in LIFE_STAGES)
+            names.extend(f"relationship_stage={stage}" for stage in RELATIONSHIP_STAGES)
         return names
 
     @property
     def context_dim(self) -> int:
         return len(self.feature_names)
 
+    @property
+    def n_journey(self) -> int:
+        """Number of trailing journey one-hot columns (0 unless include_journey)."""
+        return _N_JOURNEY if self.include_journey else 0
+
     def columns_for(
-        self, groups: Sequence[str] | None = None, include_derived: bool = True
+        self,
+        groups: Sequence[str] | None = None,
+        include_derived: bool = True,
+        include_journey: bool = True,
     ) -> np.ndarray:
         """Column indices visible to a model limited to the given feature groups.
 
-        ``None`` means all active groups. The intercept and the product
-        ownership flags are always included — every model needs a bias term
-        and must be able to see what the customer already holds.
+        ``None`` groups means all active groups. The intercept and the product
+        ownership flags are always included. ``include_derived`` toggles the
+        trend + coverage-gap columns; ``include_journey`` toggles the Digital
+        Twin journey one-hots (present only when the builder was created with
+        ``include_journey=True``) — so a model can be run with or without the
+        DToC's journey view for a clean comparison.
         """
         self._check_fitted()
         active = set(self.state.active_group_names)
@@ -149,8 +186,14 @@ class StateBuilder:
             in_categorical = any(name.startswith(f"{column}=") for column in categorical)
             if always or in_numeric or in_categorical:
                 indices.append(index)
+
+        n_base = len(base_names)
+        n_cov = len(self.products) if self.state.coverage_gaps.segment_by else 0
+        derived_end = n_base + len(self.state.trends) + n_cov
         if include_derived:
-            indices.extend(range(len(base_names), self.context_dim))
+            indices.extend(range(n_base, derived_end))
+        if include_journey and self.include_journey:
+            indices.extend(range(derived_end, derived_end + _N_JOURNEY))
         return np.asarray(indices, dtype=int)
 
     def _trend_ratio(self, frame: pd.DataFrame, trend: TrendConfig) -> np.ndarray:

@@ -92,10 +92,14 @@ for a future learned feature-evolution model.
 
 ## 4. The four capabilities
 
-**A. RL training.** Every `TwinState.context` is the exact vector the policy is trained on — the twin and
-the (vectorized) training pipeline share one `DToCWorld`. The twin is the *readable, per-customer* view;
-bulk training stays on the array pipeline for scale (2 M customers as Python objects is infeasible, but
-the two are guaranteed consistent because they use the same encoder/conversion/reward).
+**A. RL training.** When `dtoc.enabled`, the journey model's output (`life_stage` + `relationship_stage`
+one-hots) is **added to the state**, so the policy trains on journey-aware features — this is what makes
+the DToC the *core abstraction for training*, not merely a wrapper. Every `TwinState.context` is still the
+exact vector the policy trains on (the twin and the vectorized training pipeline share one `DToCWorld`,
+verified byte-identical). Bulk training stays on the array pipeline for scale (2 M customers as Python
+objects is infeasible). Running the same model with `agent.journey: true` vs `false` differs *only* by
+whether it sees the journey block, so the gap is a clean measure of the journey features' value — and the
+harness uses common random numbers, so two runs that decide identically get identical results.
 
 **B. Scenario testing.** Project the same customer under different policies and compare:
 
@@ -126,13 +130,29 @@ saving       value= 371  +bonus=0  = 371
 
 ## 5. Configuration & honesty
 
-- **`enabled` — use the DToC, or just feature vectors like before.** `dtoc.enabled: true` makes the twin
-  layer available; `dtoc.enabled: false` runs the project in **plain feature-vector mode** (the behaviour
-  before the DToC existed) and `DToCWorld.from_config` raises a clear `DToCDisabledError`. **Crucially, the
-  training pipeline is identical in both modes** — it always encodes customers into the feature (context)
-  vector and never instantiates twins (2 M+ customers as Python objects would not scale). The twin is a
-  *layer on top* of that same representation for per-customer scenario/visualization/explainability work,
-  so the toggle gates the layer, not the training.
+- **`enabled` — use the DToC, or plain feature vectors.** `dtoc.enabled: true` **folds the journey model
+  into the state** (models train on `life_stage` + `relationship_stage`) *and* makes the twin layer
+  available (scenario / visualization / explainability). `dtoc.enabled: false` runs the plain
+  feature-vector pipeline (the behaviour before the DToC) and `DToCWorld.from_config` raises
+  `DToCDisabledError`. So the flag genuinely changes training — run `agent.journey: true` vs `false` (same
+  `agent.type`) to measure exactly what the journey features buy.
+- **What we measured — two regimes (`environment.journey_influence`).** The knob sets how strongly
+  journey stage drives behaviour in the simulated world.
+  - *`journey_influence: 1` (journey redundant):* the journey features are **≈ neutral (about −1%)** —
+    they are *derived from* features the model already has, so they add exploration cost without new
+    signal. Here the DToC's value is purely its **abstraction and capabilities** (explainability,
+    scenario, journey labels), not a predictive lift.
+  - *`journey_influence: 8` (journey genuinely drives behaviour):* explicit journey features **help a lot**
+    — `linucb` with journey (~2,672) beats the same model with journey off (~2,345) by **+14%**, and even
+    the non-linear `rff_ucb` gains ~10% from journey. So *when journey matters, giving the model the
+    journey label as an explicit feature pays off.*
+- **Non-linear models do not get journey "for free."** The `rff_ucb` agent (Random-Fourier-features kernel
+  bandit, `agents/nonlinear.py`) is genuinely non-linear, yet over the base features (journey off) it only
+  matches the linear `linucb` (~2,330) and stays well below `linucb` with journey (~2,672). The journey
+  stages are **sharp thresholds** on the raw features, and smooth kernels approximate them poorly — so the
+  **explicit journey
+  model wins**. That is a concrete argument *for* the DToC journey model: it injects structure a bigger
+  black-box model does not efficiently rediscover.
 - **Config features only.** The twin, the journey model, and the transition model use exclusively the
   columns declared in `config.yml`. The ~132-feature catalog remains a *future menu*, not a dependency.
 - **`future_mode`** (only when enabled) switches projection on (`simulate`) or off (`placeholder`).

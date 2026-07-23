@@ -27,7 +27,11 @@ from rl_nba.playback import write_dashboard
 
 
 def _build_dashboard_dir(
-    *, config: AppConfig | None = None, from_file: str | Path | None = None, n_steps: int = 150
+    *,
+    config: AppConfig | None = None,
+    from_file: str | Path | None = None,
+    model: str = "champion",
+    n_steps: int = 150,
 ) -> Path:
     """Write the dashboard (freshly rendered, or copied from a file) into a temp dir."""
     directory = Path(tempfile.mkdtemp(prefix="rl_nba_dashboard_"))
@@ -39,7 +43,7 @@ def _build_dashboard_dir(
     else:
         if config is None:
             raise ValueError("Provide either config or from_file")
-        write_dashboard(config, directory / "index.html", n_steps=n_steps)
+        write_dashboard(config, directory / "index.html", model=model, n_steps=n_steps)
     return directory
 
 
@@ -65,14 +69,16 @@ def serve_background(
     config: AppConfig,
     host: str = "127.0.0.1",
     port: int = 8000,
+    model: str = "champion",
     n_steps: int = 150,
 ) -> tuple[socketserver.TCPServer, str]:
     """Serve the dashboard on a daemon thread (non-blocking). Returns ``(server, url)``.
 
     Intended for notebooks: the call returns immediately while the server keeps
-    running. Stop it with ``server.shutdown()``.
+    running. Stop it with ``server.shutdown()``. ``model`` picks which model to
+    play back (``"champion"`` by default, or a type name like ``"linucb"``).
     """
-    directory = _build_dashboard_dir(config=config, n_steps=n_steps)
+    directory = _build_dashboard_dir(config=config, model=model, n_steps=n_steps)
     server, bound_port = _bind_server(directory, host, port)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f"http://{host}:{bound_port}/"
@@ -90,6 +96,12 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--port", type=int, default=8000, help="preferred port (default: 8000)")
     parser.add_argument("--steps", type=int, default=150, help="decisions to record (default: 150)")
+    parser.add_argument(
+        "--model",
+        default="champion",
+        help="model to play back: champion (best of the config's models) or a type "
+        "name like linucb / rff_ucb / random (default: champion)",
+    )
     parser.add_argument("--no-browser", action="store_true", help="do not open a browser")
     parser.add_argument(
         "--from-file", default=None, help="serve this existing HTML instead of regenerating"
@@ -100,7 +112,9 @@ def main(argv: list[str] | None = None) -> None:
         directory = _build_dashboard_dir(from_file=args.from_file)
         print(f"Serving existing dashboard: {args.from_file}")
     else:
-        directory = _build_dashboard_dir(config=load_config(args.config), n_steps=args.steps)
+        directory = _build_dashboard_dir(
+            config=load_config(args.config), model=args.model, n_steps=args.steps
+        )
         print(f"Generated dashboard from {args.config} ({args.steps} decisions).")
 
     server, port = _bind_server(directory, args.host, args.port)

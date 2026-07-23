@@ -43,11 +43,29 @@ class ConversionModel:
         base_conversion_rate: float,
         context_influence: float,
         rng: np.random.Generator,
+        base_dim: int | None = None,
+        journey_influence: float = 1.0,
     ) -> ConversionModel:
-        """Draw a random ground-truth model with a calibrated base rate."""
-        scale = context_influence / np.sqrt(max(context_dim - 1, 1))
-        weights = rng.normal(0.0, scale, size=(n_actions, context_dim))
+        """Draw a random ground-truth model with a calibrated base rate.
+
+        ``base_dim`` (default: ``context_dim``) is the number of leading columns
+        drawn as the "base" world. Columns beyond it (e.g. Digital-Twin journey
+        one-hots) are drawn in a *separate* rng call scaled by
+        ``journey_influence`` — so the base weights are identical whether or not
+        those extra columns are present (enabled/disabled worlds stay comparable
+        on their common features), and ``journey_influence`` sets how strongly the
+        journey block drives behaviour (1.0 = like any feature; higher = a world
+        where journey stage genuinely matters).
+        """
+        base_dim = context_dim if base_dim is None else base_dim
+        scale = context_influence / np.sqrt(max(base_dim - 1, 1))
+        weights = rng.normal(0.0, scale, size=(n_actions, base_dim))
         weights[:, 0] = _logit(base_conversion_rate) + rng.normal(0.0, 0.35, size=n_actions)
+        if base_dim < context_dim:
+            extra = rng.normal(
+                0.0, scale * journey_influence, size=(n_actions, context_dim - base_dim)
+            )
+            weights = np.hstack([weights, extra])
         return cls(weights=weights)
 
     def probabilities(self, contexts: np.ndarray) -> np.ndarray:
