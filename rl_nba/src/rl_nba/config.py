@@ -20,6 +20,7 @@ import yaml
 VALID_SOURCES = ("synthetic", "csv", "parquet", "databricks")
 VALID_REWARD_TYPES = ("conversion", "revenue", "ape", "vnb")
 VALID_DELIVERY_MODES = ("assigned_agent", "mixed", "direct")
+VALID_FUTURE_MODES = ("simulate", "placeholder")
 
 # The feature group that describes the selling agent rather than the customer.
 # state.delivery controls whether it enters the state (direct sales have no
@@ -177,6 +178,27 @@ class ExperimentConfig:
 
 
 @dataclass(frozen=True)
+class DToCConfig:
+    """Digital Twin of Customer layer.
+
+    ``enabled``: ``True`` makes the DToC layer available (per-customer twins for
+    scenario testing, journey visualization, and explainability); ``False`` runs
+    the project in plain **feature-vector** mode (as before the DToC existed) and
+    building a twin raises a clear error. Training uses the feature vector either
+    way — this flag only gates the twin layer on top.
+
+    ``future_mode`` (only when enabled): ``simulate`` projects the customer
+    forward through the environment (scenario what-ifs); ``placeholder`` defines
+    the future slot but performs no projection.
+    """
+
+    enabled: bool = True
+    future_mode: str = "simulate"
+    horizon: int = 6  # number of future steps to project when future_mode == "simulate"
+    time_step_months: int = 1  # months advanced per projected step
+
+
+@dataclass(frozen=True)
 class AppConfig:
     data: DataConfig = field(default_factory=DataConfig)
     products: ProductsConfig = field(default_factory=ProductsConfig)
@@ -185,6 +207,7 @@ class AppConfig:
     synthetic: SyntheticConfig = field(default_factory=SyntheticConfig)
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
+    dtoc: DToCConfig = field(default_factory=DToCConfig)
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -211,6 +234,7 @@ def config_from_dict(raw: Mapping[str, Any]) -> AppConfig:
         synthetic=_parse_synthetic(_section(raw, "synthetic")),
         environment=_parse_environment(_section(raw, "environment")),
         experiment=_parse_experiment(_section(raw, "experiment")),
+        dtoc=_parse_dtoc(_section(raw, "dtoc")),
     )
     _validate(config)
     return config
@@ -342,6 +366,16 @@ def _parse_reward(section: Mapping[str, Any]) -> RewardConfig:
     return RewardConfig(type=str(section.get("type", "conversion")))
 
 
+def _parse_dtoc(section: Mapping[str, Any]) -> DToCConfig:
+    defaults = DToCConfig()
+    return DToCConfig(
+        enabled=bool(section.get("enabled", defaults.enabled)),
+        future_mode=str(section.get("future_mode", defaults.future_mode)),
+        horizon=int(section.get("horizon", defaults.horizon)),
+        time_step_months=int(section.get("time_step_months", defaults.time_step_months)),
+    )
+
+
 def _parse_synthetic(section: Mapping[str, Any]) -> SyntheticConfig:
     defaults = SyntheticConfig()
     return SyntheticConfig(
@@ -439,6 +473,13 @@ def _validate(config: AppConfig) -> None:
     )
     _require(config.experiment.n_rounds > 0, "experiment.n_rounds must be positive")
     _require(len(config.experiment.agents) > 0, "experiment.agents must list at least one agent")
+
+    _require(
+        config.dtoc.future_mode in VALID_FUTURE_MODES,
+        f"dtoc.future_mode must be one of {VALID_FUTURE_MODES}, got '{config.dtoc.future_mode}'",
+    )
+    _require(config.dtoc.horizon >= 0, "dtoc.horizon must be non-negative")
+    _require(config.dtoc.time_step_months >= 1, "dtoc.time_step_months must be at least 1")
 
 
 def _validate_state(config: AppConfig) -> None:

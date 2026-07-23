@@ -127,3 +127,16 @@ experiment:
     random: {}
     baseline: {type: linucb, alpha: 1.0, features: [profile, holdings], derived: false}
     enhanced: {type: linucb, alpha: 1.0}   # all active groups + trends + coverage gaps
+
+# Digital Twin of Customer (DToC) layer.
+dtoc:
+  # true  -> DToC layer available (twins for scenario / visualization / explainability)
+  # false -> plain feature-vector mode, as before the DToC (building a twin then errors).
+  #          Training uses the feature vector either way; this only gates the twin layer.
+  enabled: true
+  # future-state handling (only when enabled):
+  #   simulate    -> project the customer forward under a policy (scenario what-ifs)
+  #   placeholder -> represent only observed history + current (no projection)
+  future_mode: simulate
+  horizon: 6              # future steps to project when future_mode is "simulate"
+  time_step_months: 1     # months advanced per projected step

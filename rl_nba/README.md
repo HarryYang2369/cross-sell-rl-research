@@ -155,6 +155,7 @@ rl_nba/                         this project
     playback_dashboard.html     interactive step-by-step episode playback (open in a browser)
   docs/
     customer_state_and_journey_model.md   customer states, journey, and full feature catalog
+    digital_twin_of_customer.md           DToC layer + journey model + Databricks table linking
     rl_project_spec_draft.md              initial project spec / requirements (draft)
     RL_for_cross_sell_overview.pptx       concept slide deck
   src/rl_nba/
@@ -167,9 +168,33 @@ rl_nba/                         this project
       simulate.py               run agents, learning curves, regret, summary table
       ope.py                    IPS / SNIPS off-policy evaluation (ready for real logs)
       plots.py                  results figure
+    journey.py                  standardized journey model (life-stage + relationship-stage)
+    dtoc.py                     Digital Twin of Customer: per-customer timeline + scenarios
     playback.py                 record an episode + render the playback dashboard
+    serve.py                    serve the playback dashboard on localhost
     run.py                      CLI entry point (prepare / run / save pipeline)
 ```
+
+## Digital Twin of Customer (DToC)
+
+Each customer can be wrapped in a `DigitalTwin` — a timeline of states (historical / current /
+projected-future) that serves as one abstraction for RL training, scenario testing, journey
+visualization, and policy explainability. It's built only on config features and reuses the training
+world model. See `docs/digital_twin_of_customer.md`.
+
+```python
+from rl_nba import DToCWorld, twin_from_row
+world = DToCWorld.from_config(config)
+twin  = twin_from_row(world, customer_row)
+twin.current.journey.label        # e.g. "new_parents / single_product"
+twin.project(trained_agent)       # future_mode: simulate -> scenario roll-out
+twin.explain(trained_agent)       # per-product value + exploration bonus (why this offer)
+```
+
+Toggle the whole layer with **`dtoc.enabled`**: `true` uses the DToC; `false` runs in plain
+feature-vector mode (as before the DToC — building a twin then raises a clear error). Training uses the
+feature vector either way; the flag only gates the twin layer. `dtoc.future_mode` (when enabled) switches
+future-state projection on (`simulate`) or off (`placeholder`).
 
 ## Roadmap
 
