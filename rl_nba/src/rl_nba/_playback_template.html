@@ -245,7 +245,7 @@
     <button class="btn icon" id="fwd" title="Next" aria-label="Next decision">▶</button>
     <div class="scrub-wrap">
       <input class="scrub" id="scrub" type="range" min="0" value="0" step="1" aria-label="Scrub through decisions" />
-      <span class="counter">Decision <b id="cur">1</b> / <span id="tot">150</span></span>
+      <span class="counter">Round <b id="cur">1</b> / <span id="tot">30,000</span></span>
     </div>
     <select class="speed" id="speed" aria-label="Playback speed">
       <option value="1400">0.5×</option>
@@ -314,10 +314,11 @@
 
   <p class="foot">
     <b>What you're seeing.</b> Early on, every bar is almost all “benefit of the doubt” — the
-    agent knows nothing, so it explores. As offers play out, the solid “expected value” takes
-    over and the doubt shrinks: it has learned, and now exploits what works. That shift — and
-    the agent's line climbing from the random floor toward the best-possible ceiling — is
-    reinforcement learning in action.
+    agent knows nothing, so it explores, and for the first stretch it can even trail the
+    random-offer line while it gathers data. As offers play out, the solid “expected value”
+    takes over and the doubt shrinks: it has learned, and now exploits what works — the
+    agent's line pulls off the random floor and climbs toward the best-possible ceiling. That
+    whole arc, cold start to champion, is reinforcement learning in action.
     <span class="note">These customers and outcomes are simulated, so the numbers show that the
     method learns — not yet how real customers will behave.</span>
   </p>
@@ -329,7 +330,8 @@
     "use strict";
     var DATA = JSON.parse(document.getElementById("trace-data").textContent);
     var steps = DATA.steps, meta = DATA.meta;
-    var N = steps.length;
+    var N = steps.length;                       // decision cards (snapshots) we can step through
+    var TOTAL = meta.total_rounds || N;         // rounds the model actually trained over
     var cur = meta.currency || "";
     var $ = function (id) { return document.getElementById(id); };
 
@@ -347,7 +349,9 @@
     // ---- static chart geometry ----
     var W = 640, H = 210, PL = 46, PR = 12, PT = 12, PB = 26;
     var maxY = steps[N - 1].cumulative.oracle || 1;
-    function sx(i) { return PL + (i / Math.max(N - 1, 1)) * (W - PL - PR); }
+    // x is the model's true training round, so the curve spans the whole run
+    // (snapshots cluster early where learning is fastest, then spread out).
+    function sx(i) { return PL + (steps[i].step / Math.max(TOTAL - 1, 1)) * (W - PL - PR); }
     function sy(v) { return H - PB - (v / maxY) * (H - PT - PB); }
     function pathFor(key) {
       var d = "";
@@ -369,6 +373,13 @@
       t.textContent = f === 0 ? "0" : (cur + fmt(maxY * f));
       svg.appendChild(t);
     });
+    // x-axis end labels — the horizontal span is the whole training run
+    var xL = el("text", { x: PL, y: H - 8, "text-anchor": "start", class: "axis-label" });
+    xL.textContent = "round 1";
+    svg.appendChild(xL);
+    var xR = el("text", { x: W - PR, y: H - 8, "text-anchor": "end", class: "axis-label" });
+    xR.textContent = fmt(TOTAL) + " offers";
+    svg.appendChild(xR);
     svg.appendChild(el("path", { d: pathFor("random"), fill: "none", stroke: "var(--random)", "stroke-width": 2, "stroke-dasharray": "4 4" }));
     svg.appendChild(el("path", { d: pathFor("oracle"), fill: "none", stroke: "var(--oracle)", "stroke-width": 2, "stroke-dasharray": "5 4" }));
     svg.appendChild(el("path", { d: pathFor("agent"), fill: "none", stroke: "var(--accent)", "stroke-width": 2.5, "stroke-linejoin": "round" }));
@@ -380,7 +391,7 @@
     // ---- render one step ----
     function render(i) {
       var s = steps[i];
-      $("cur").textContent = i + 1;
+      $("cur").textContent = fmt(s.step + 1);   // the model's true training round
       $("scrub").value = i;
 
       // tiles
@@ -391,7 +402,7 @@
 
       // customer
       $("cust-id").textContent = s.customer_id;
-      $("cust-tag").textContent = "customer #" + (i + 1) + " this episode";
+      $("cust-tag").textContent = "round " + fmt(s.step + 1) + " of " + fmt(TOTAL);
       var attrs = s.attributes.map(function (a) {
         return '<div class="attr"><span class="l">' + a[0] + '</span><span class="r">' + a[1] + "</span></div>";
       }).join("");
@@ -436,7 +447,7 @@
 
     // ---- controls ----
     var idx = 0, timer = null;
-    $("tot").textContent = N;
+    $("tot").textContent = fmt(TOTAL);          // total rounds, not the snapshot count
     $("cur-word").textContent = cur || "";
     if (!cur) { $("t-earned-sub").textContent = "offers accepted"; }
     $("scrub").max = N - 1;

@@ -31,7 +31,8 @@ def _build_dashboard_dir(
     config: AppConfig | None = None,
     from_file: str | Path | None = None,
     model: str = "champion",
-    n_steps: int = 150,
+    rounds: int | None = None,
+    snapshots: int = 380,
 ) -> Path:
     """Write the dashboard (freshly rendered, or copied from a file) into a temp dir."""
     directory = Path(tempfile.mkdtemp(prefix="rl_nba_dashboard_"))
@@ -43,7 +44,9 @@ def _build_dashboard_dir(
     else:
         if config is None:
             raise ValueError("Provide either config or from_file")
-        write_dashboard(config, directory / "index.html", model=model, n_steps=n_steps)
+        write_dashboard(
+            config, directory / "index.html", model=model, rounds=rounds, snapshots=snapshots
+        )
     return directory
 
 
@@ -70,7 +73,8 @@ def serve_background(
     host: str = "127.0.0.1",
     port: int = 8000,
     model: str = "champion",
-    n_steps: int = 150,
+    rounds: int | None = None,
+    snapshots: int = 380,
 ) -> tuple[socketserver.TCPServer, str]:
     """Serve the dashboard on a daemon thread (non-blocking). Returns ``(server, url)``.
 
@@ -78,7 +82,9 @@ def serve_background(
     running. Stop it with ``server.shutdown()``. ``model`` picks which model to
     play back (``"champion"`` by default, or a type name like ``"linucb"``).
     """
-    directory = _build_dashboard_dir(config=config, model=model, n_steps=n_steps)
+    directory = _build_dashboard_dir(
+        config=config, model=model, rounds=rounds, snapshots=snapshots
+    )
     server, bound_port = _bind_server(directory, host, port)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f"http://{host}:{bound_port}/"
@@ -95,7 +101,18 @@ def main(argv: list[str] | None = None) -> None:
         "--host", default="127.0.0.1", help="bind address (default: localhost only)"
     )
     parser.add_argument("--port", type=int, default=8000, help="preferred port (default: 8000)")
-    parser.add_argument("--steps", type=int, default=150, help="decisions to record (default: 150)")
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=None,
+        help="episode length to replay (default: the config's full experiment.n_rounds)",
+    )
+    parser.add_argument(
+        "--snapshots",
+        type=int,
+        default=380,
+        help="decision cards sampled across the run (default: 380)",
+    )
     parser.add_argument(
         "--model",
         default="champion",
@@ -113,9 +130,12 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Serving existing dashboard: {args.from_file}")
     else:
         directory = _build_dashboard_dir(
-            config=load_config(args.config), model=args.model, n_steps=args.steps
+            config=load_config(args.config),
+            model=args.model,
+            rounds=args.rounds,
+            snapshots=args.snapshots,
         )
-        print(f"Generated dashboard from {args.config} ({args.steps} decisions).")
+        print(f"Generated dashboard from {args.config} (full learning run).")
 
     server, port = _bind_server(directory, args.host, args.port)
     url = f"http://{args.host}:{port}/"

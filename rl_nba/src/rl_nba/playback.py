@@ -81,13 +81,33 @@ def champion_type(config: AppConfig) -> str:
     return winner
 
 
+def _snapshot_indices(total: int, target: int) -> list[int]:
+    """Round indices to keep as decision cards: every one of the first rounds
+    (the cold-start, where exploration is liveliest), then spread evenly across
+    the rest — capped near ``target`` so the page stays small and scrubbable."""
+    if total <= target:
+        return list(range(total))
+    early = min(100, total)
+    spread = np.linspace(0, total - 1, max(target - early, 2))
+    return sorted({*range(early), *(int(i) for i in spread)})
+
+
 def record_playback(
     config: AppConfig,
     model: str = "champion",
-    n_steps: int = 150,
+    rounds: int | None = None,
+    snapshots: int = 380,
     seed: int = 20260721,
 ) -> dict[str, Any]:
-    """Record ``n_steps`` decisions of one model for the playback dashboard.
+    """Record a model's whole learning run for the playback dashboard.
+
+    Runs the model over the full episode (``rounds``, default the config's
+    ``experiment.n_rounds``) so the dashboard chart shows the *entire* learning
+    curve — cold-start included — climbing from the random floor toward the
+    oracle. Storing all 30k decisions would be a huge, un-scrubbable page, so it
+    keeps ``snapshots`` decision cards sampled across the run (dense over the
+    first rounds where exploration is liveliest, then spread out). The running
+    totals are accumulated over *every* round, so the chart and tiles are exact.
 
     ``model`` chooses which model plays back: ``"champion"`` (the best-performing
     type the config runs — see :func:`champion_type`) or an explicit type name
@@ -139,13 +159,18 @@ def record_playback(
     can_explain = hasattr(agent, "explain")
     env_rng = np.random.default_rng(seed + 1)
 
-    n_steps = min(n_steps, len(prepared.customer_sequence))
+    total = (
+        len(prepared.customer_sequence)
+        if rounds is None
+        else min(rounds, len(prepared.customer_sequence))
+    )
+    snapshot_at = set(_snapshot_indices(total, snapshots))
     cumulative = {"agent": 0.0, "random": 0.0, "oracle": 0.0}
     conversions = 0
     value_earned = 0.0
     steps: list[dict[str, Any]] = []
 
-    for step in range(n_steps):
+    for step in range(total):
         customer = int(prepared.customer_sequence[step])
         context = simulator.context(customer)
         view = agent_view(context)
@@ -171,6 +196,10 @@ def record_playback(
         cumulative["random"] += float(
             np.mean([simulator.expected_reward(customer, action) for action in eligible])
         )
+
+        # Accumulate over every round, but only keep a card at sampled snapshots.
+        if step not in snapshot_at:
+            continue
 
         options = [
             {
@@ -211,7 +240,8 @@ def record_playback(
                 config.reward.type, "conversions"
             ),
             "products": [_pretty_product(product) for product in catalog],
-            "n_steps": n_steps,
+            "total_rounds": total,
+            "snapshots": len(steps),
             "model": model_type,
             "model_label": _MODEL_LABELS.get(model_type, model_type),
             "is_champion": bool(is_champion),
@@ -242,11 +272,14 @@ def write_dashboard(
     config: AppConfig,
     out_path: str | Path,
     model: str = "champion",
-    n_steps: int = 150,
+    rounds: int | None = None,
+    snapshots: int = 380,
     seed: int = 20260721,
 ) -> Path:
-    """Record an episode of the chosen model and write the playback dashboard."""
-    trace = record_playback(config, model=model, n_steps=n_steps, seed=seed)
+    """Record a model's full learning run and write the playback dashboard."""
+    trace = record_playback(
+        config, model=model, rounds=rounds, snapshots=snapshots, seed=seed
+    )
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(render_dashboard(trace), encoding="utf-8")
