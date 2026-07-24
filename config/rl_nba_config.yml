@@ -152,3 +152,53 @@ dtoc:
   future_mode: simulate
   horizon: 6              # future steps to project when future_mode is "simulate"
   time_step_months: 1     # months advanced per projected step
+
+# =============================================================================
+# Gym environment (rl_nba.environment.gym_env) — for training with RL libraries
+# (Stable-Baselines3, RLlib, ...). It reuses everything above (state, reward,
+# dtoc journey features), so this block only sets the RL-loop shape.
+# =============================================================================
+gym:
+  # mode = the flavour, or "none" to switch the Gym env off entirely:
+  #   none    -> disabled; building CrossSellEnv raises GymDisabledError.
+  #   rollout -> a batch of offers = one episode (truncated at steps_per_episode),
+  #              a fresh customer each step. The shape most deep-RL trainers expect.
+  #   bandit  -> one offer = one episode (terminated each step); the faithful
+  #              contextual-bandit view.
+  #   masked  -> like rollout, but eligibility is HARD-enforced (an illegal offer is
+  #              remapped to a legal one). Pairs with sb3-contrib MaskablePPO.
+  mode: rollout
+  steps_per_episode: 256   # episode length for rollout / masked (ignored for bandit)
+  # Eligibility (never re-offer an owned product) is always exposed as an action
+  # mask (info["action_mask"] + action_masks() for MaskablePPO). This is only the
+  # reward an UNMASKED agent gets for offering an owned product in the SOFT modes
+  # (bandit / rollout); in masked mode the offer is remapped instead.
+  illegal_reward: 0.0
+
+# =============================================================================
+# Population panel environment (rl_nba.environment.population) — the 48-month
+# SEQUENTIAL simulation. Steps the whole customer base forward one month at a
+# time, optimising long-term cumulative value. Every rate/weight is a knob; the
+# exact reward formula is still being researched, so these are placeholders.
+# =============================================================================
+population:
+  # horizon (customer count = the whole pool, set by synthetic.n_customers / real data)
+  n_months: 48             # episode length (monthly cut-offs)
+  seed: 7
+  # capacity & governance (applied before ranking + execution each month)
+  monthly_capacity: 500    # max offers executed per month (-1 = unlimited)
+  consent_rate: 0.9        # fraction of customers who consent to contact
+  contact_cooldown: 2      # months before a contacted customer may be contacted again
+  operational_cost: 0.0    # cost charged per executed offer (agent / telesales resource)
+  # long-term reward (issuance value minus lapse/surrender/complaint/operational costs)
+  discount: 0.999          # per-month discount on the cumulative reward
+  issuance_value: vnb      # value credited on issuance: conversion | revenue | ape | vnb
+  lapse_penalty: 0.5       # fraction of a policy's value lost on lapse
+  surrender_penalty: 0.8   # fraction of a policy's value lost on surrender
+  complaint_cost: 100.0    # flat cost charged per complaint
+  # monthly dynamics (hazards / drift)
+  lapse_rate: 0.004        # monthly per-policy lapse hazard
+  surrender_rate: 0.002    # monthly per-policy surrender hazard
+  complaint_rate: 0.001    # baseline monthly complaint probability
+  fatigue_penalty: 0.05    # extra complaint probability for customers contacted that month
+  engagement_decay: 0.01   # monthly engagement decay

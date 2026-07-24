@@ -14,11 +14,18 @@ dependencies = [
     "pyyaml>=6.0",
     "matplotlib>=3.8",
     "pyarrow>=15.0",
+    "gymnasium>=0.29",
 ]
 
 [project.optional-dependencies]
 dev = [
     "ruff>=0.5",
+]
+# Deep-RL agents for the Gym env (PPO / DQN / MaskablePPO). Heavy — pulls in
+# PyTorch — and only needed for that bake-off, so it is kept out of the core.
+rl = [
+    "stable-baselines3>=2.0",
+    "sb3-contrib>=2.0",
 ]
 
 [project.scripts]

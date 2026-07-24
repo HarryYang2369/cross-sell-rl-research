@@ -206,6 +206,75 @@ features' value — ≈ neutral at the default `environment.journey_influence`, 
 `linucb`) when journey genuinely drives behaviour (see `docs/digital_twin_of_customer.md` §5).
 `dtoc.future_mode` switches future-state projection on (`simulate`) or off (`placeholder`).
 
+## Gym environment (for RL libraries)
+
+`rl_nba.environment.gym_env.CrossSellEnv` wraps the simulator in a standard **Gymnasium** `Env`, so
+Stable-Baselines3 / RLlib / CleanRL can train on the same world the bandits use (journey features
+included when `dtoc.enabled`). Observation = the customer context (`Box`); action = which product to
+offer (`Discrete`); reward = your configured `conversion`/`ape`/`vnb`.
+
+```python
+from rl_nba.config import load_config
+from rl_nba.environment.gym_env import CrossSellEnv
+
+env = CrossSellEnv(config=load_config("config/rl_nba_config.yml"))
+obs, info = env.reset(seed=0)
+obs, reward, terminated, truncated, info = env.step(action)   # info["action_mask"] = eligibility
+```
+
+The `gym:` config block sets the RL-loop shape (everything else is reused). One `mode` switch picks the
+flavour — or turns the env off:
+
+- **`mode`** — the single "which flavour" switch:
+  - `none` — Gym disabled; building `CrossSellEnv` raises `GymDisabledError` (declare "not using Gym").
+  - `bandit` — one offer = one episode (`terminated` each step); the faithful contextual-bandit view.
+  - `rollout` — a batch of `steps_per_episode` offers per episode (`truncated` at the limit, a fresh
+    customer each step); what most deep-RL trainers expect. Eligibility is a *soft* mask.
+  - `masked` — like `rollout` but eligibility is *hard*-enforced (an illegal offer is remapped to a
+    legal one); pairs with sb3-contrib's `MaskablePPO`.
+- **`steps_per_episode`** — episode length for `rollout` / `masked`.
+- **`illegal_reward`** — the eligibility mask is always exposed (`info["action_mask"]` and
+  `action_masks()`); this is only what an *unmasked* agent earns for offering an owned product in the
+  soft modes (`bandit` / `rollout`).
+
+`gymnasium` is a core dependency; the deep-RL trainers are the optional `rl` extra (`pip install -e .[rl]`,
+which pulls in PyTorch). See `examples/gym_quickstart.py` for a random rollout plus an optional
+MaskablePPO run. Note: on a single-step problem, deep RL is usually *outperformed* by the contextual
+bandits here — the Gym env's value is ecosystem interoperability and the on-ramp to sequential RL.
+
+## Population panel environment (48-month sequential)
+
+`rl_nba.environment.population` is a **sequential** env that steps the *whole customer base* forward one
+month at a time and optimises **long-term cumulative value** (not just immediate conversion). Each month:
+the agent proposes a `(product, priority)` per customer from the frame `(n_customers × state)`; governance
+gates it (**consent**, **eligibility**, **contact-frequency cooldown**); the monthly **capacity** keeps
+only the highest-priority offers and the rest become **no-offer**; executed offers may convert
+(**issuance**), every policy may **lapse**/**surrender**, contacted customers may **complain**; and the
+reward nets issuance value against lapse/surrender/complaint/operational costs, discounted over the horizon.
+
+```bash
+python -m rl_nba.environment.population --agent linucb   # runs an episode, saves results/episode.png
+```
+
+```python
+from rl_nba.config import load_config
+from rl_nba.environment.population import run_episode, compare, plot_episode
+cfg = load_config("config/rl_nba_config.yml")
+print(compare(cfg))                    # linucb vs random on long-term value
+plot_episode(run_episode(cfg), "episode.png")
+```
+
+`LinUCB` applies row-wise to the frame (a per-customer policy, fully vectorised — a 5,000-customer, 48-month
+episode runs in ~1s), and already beats random on long-term value. It uses the whole customer pool (scale
+is set by `synthetic.n_customers`, or the real data — there's no separate population size knob). Everything
+else is a config knob under `population:` — `n_months`, `monthly_capacity`, `consent_rate`,
+`contact_cooldown`, `discount`, `issuance_value` (ape/vnb/…), and every hazard/penalty (`lapse_rate`,
+`surrender_rate`,
+`complaint_rate`, `fatigue_penalty`, `lapse_penalty`, …). The reward weights are **documented placeholders**
+until the exact long-term-value formula is researched. A bandit learns immediate offer value here; a true
+*sequential* optimiser (PPO/DQN via RLlib) is the planned next step, along with interactive episode/evaluation
+dashboards (the `EpisodeTrace` already captures every metric they need; `plot_episode` renders a PNG for now).
+
 ## Roadmap
 
 1. **Now — simulation:** prove the loop end-to-end; compare agents; tune the

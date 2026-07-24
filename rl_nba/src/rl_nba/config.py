@@ -22,6 +22,7 @@ VALID_REWARD_TYPES = ("conversion", "revenue", "ape", "vnb")
 VALID_DELIVERY_MODES = ("assigned_agent", "mixed", "direct")
 VALID_FUTURE_MODES = ("simulate", "placeholder")
 VALID_AGENT_TYPES = ("random", "linucb", "rff_ucb", "all")
+VALID_GYM_MODES = ("none", "bandit", "rollout", "masked")
 
 # The feature group that describes the selling agent rather than the customer.
 # state.delivery controls whether it enters the state (direct sales have no
@@ -213,6 +214,83 @@ class DToCConfig:
 
 
 @dataclass(frozen=True)
+class GymConfig:
+    """The Gymnasium environment (``rl_nba.environment.gym_env``).
+
+    ``mode`` picks the flavour (or turns the env off):
+      * ``none``    — the Gym env is disabled; constructing ``CrossSellEnv``
+        raises ``GymDisabledError``. Use it to declare "we're not using Gym".
+      * ``bandit``  — every offer is its own one-step episode (``terminated``
+        each step); the faithful contextual-bandit view.
+      * ``rollout`` — ``steps_per_episode`` offers per episode (``truncated`` at
+        the limit, a fresh customer each step); the shape most deep-RL trainers
+        (Stable-Baselines3, RLlib) expect. Eligibility is a *soft* mask — an
+        agent may offer an owned product and earns ``illegal_reward``.
+      * ``masked``  — like ``rollout``, but eligibility is *hard*-enforced: an
+        illegal (owned-product) offer is remapped to a legal one, so it can
+        never happen. Pairs with sb3-contrib ``MaskablePPO``.
+
+    The eligibility mask is always exposed — ``info['action_mask']`` and
+    ``action_masks()`` — regardless of mode.
+    """
+
+    mode: str = "rollout"
+    steps_per_episode: int = 256
+    illegal_reward: float = 0.0
+
+    @property
+    def enabled(self) -> bool:
+        return self.mode != "none"
+
+    @property
+    def single_step(self) -> bool:
+        """bandit mode: one offer per episode (terminated), vs a rollout batch."""
+        return self.mode == "bandit"
+
+    @property
+    def hard_mask(self) -> bool:
+        """masked mode: eligibility is enforced, not just penalized."""
+        return self.mode == "masked"
+
+
+@dataclass(frozen=True)
+class PopulationConfig:
+    """The 48-month population panel environment (``rl_nba.environment.population``).
+
+    A *sequential* env: it steps the whole customer base forward one month at a
+    time and optimises long-term cumulative value. Every hazard rate and reward
+    weight here is a knob — the exact reward formula is still being researched,
+    so these are documented placeholders, not final numbers.
+    """
+
+    # -- horizon --
+    # (The number of customers is the whole offerable pool — set by
+    # synthetic.n_customers, or the real data. There is no separate knob here.)
+    n_months: int = 48         # episode length (monthly cut-offs)
+    seed: int = 7
+
+    # -- capacity & governance --
+    monthly_capacity: int = 500  # max offers executed per month (-1 = unlimited)
+    consent_rate: float = 0.9    # fraction of customers who consent to contact
+    contact_cooldown: int = 2    # months before a contacted customer may be contacted again
+    operational_cost: float = 0.0  # cost charged per executed offer (agent/telesales resource)
+
+    # -- long-term reward --
+    discount: float = 0.999      # per-month discount on the cumulative reward
+    issuance_value: str = "vnb"  # value credited on issuance: conversion | revenue | ape | vnb
+    lapse_penalty: float = 0.5      # fraction of a policy's value lost on lapse
+    surrender_penalty: float = 0.8  # fraction lost on surrender
+    complaint_cost: float = 100.0   # flat cost charged per complaint
+
+    # -- monthly dynamics (hazards / drift) --
+    lapse_rate: float = 0.004      # monthly per-policy lapse hazard
+    surrender_rate: float = 0.002  # monthly per-policy surrender hazard
+    complaint_rate: float = 0.001  # baseline monthly complaint probability
+    fatigue_penalty: float = 0.05  # extra complaint prob when contacted inside the cooldown
+    engagement_decay: float = 0.01  # monthly engagement decay
+
+
+@dataclass(frozen=True)
 class AppConfig:
     data: DataConfig = field(default_factory=DataConfig)
     products: ProductsConfig = field(default_factory=ProductsConfig)
@@ -223,6 +301,8 @@ class AppConfig:
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
     dtoc: DToCConfig = field(default_factory=DToCConfig)
+    gym: GymConfig = field(default_factory=GymConfig)
+    population: PopulationConfig = field(default_factory=PopulationConfig)
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -251,6 +331,8 @@ def config_from_dict(raw: Mapping[str, Any]) -> AppConfig:
         environment=_parse_environment(_section(raw, "environment")),
         experiment=_parse_experiment(_section(raw, "experiment")),
         dtoc=_parse_dtoc(_section(raw, "dtoc")),
+        gym=_parse_gym(_section(raw, "gym")),
+        population=_parse_population(_section(raw, "population")),
     )
     _validate(config)
     return config
@@ -392,6 +474,38 @@ def _parse_dtoc(section: Mapping[str, Any]) -> DToCConfig:
     )
 
 
+def _parse_gym(section: Mapping[str, Any]) -> GymConfig:
+    defaults = GymConfig()
+    return GymConfig(
+        mode=str(section.get("mode", defaults.mode)),
+        steps_per_episode=int(section.get("steps_per_episode", defaults.steps_per_episode)),
+        illegal_reward=float(section.get("illegal_reward", defaults.illegal_reward)),
+    )
+
+
+def _parse_population(section: Mapping[str, Any]) -> PopulationConfig:
+    d = PopulationConfig()
+    g = section.get
+    return PopulationConfig(
+        n_months=int(g("n_months", d.n_months)),
+        seed=int(g("seed", d.seed)),
+        monthly_capacity=int(g("monthly_capacity", d.monthly_capacity)),
+        consent_rate=float(g("consent_rate", d.consent_rate)),
+        contact_cooldown=int(g("contact_cooldown", d.contact_cooldown)),
+        operational_cost=float(g("operational_cost", d.operational_cost)),
+        discount=float(g("discount", d.discount)),
+        issuance_value=str(g("issuance_value", d.issuance_value)),
+        lapse_penalty=float(g("lapse_penalty", d.lapse_penalty)),
+        surrender_penalty=float(g("surrender_penalty", d.surrender_penalty)),
+        complaint_cost=float(g("complaint_cost", d.complaint_cost)),
+        lapse_rate=float(g("lapse_rate", d.lapse_rate)),
+        surrender_rate=float(g("surrender_rate", d.surrender_rate)),
+        complaint_rate=float(g("complaint_rate", d.complaint_rate)),
+        fatigue_penalty=float(g("fatigue_penalty", d.fatigue_penalty)),
+        engagement_decay=float(g("engagement_decay", d.engagement_decay)),
+    )
+
+
 def _parse_synthetic(section: Mapping[str, Any]) -> SyntheticConfig:
     defaults = SyntheticConfig()
     return SyntheticConfig(
@@ -511,6 +625,26 @@ def _validate(config: AppConfig) -> None:
     )
     _require(config.dtoc.horizon >= 0, "dtoc.horizon must be non-negative")
     _require(config.dtoc.time_step_months >= 1, "dtoc.time_step_months must be at least 1")
+
+    gym = config.gym
+    _require(
+        gym.mode in VALID_GYM_MODES,
+        f"gym.mode must be one of {VALID_GYM_MODES}, got '{gym.mode}'",
+    )
+    _require(gym.steps_per_episode >= 1, "gym.steps_per_episode must be at least 1")
+
+    pop = config.population
+    _require(pop.n_months >= 1, "population.n_months must be at least 1")
+    _require(
+        pop.issuance_value in VALID_REWARD_TYPES,
+        f"population.issuance_value must be one of {VALID_REWARD_TYPES}, "
+        f"got '{pop.issuance_value}'",
+    )
+    _require(0.0 < pop.discount <= 1.0, "population.discount must be in (0, 1]")
+    _require(pop.contact_cooldown >= 0, "population.contact_cooldown must be non-negative")
+    for name in ("consent_rate", "lapse_rate", "surrender_rate", "complaint_rate"):
+        value = getattr(pop, name)
+        _require(0.0 <= value <= 1.0, f"population.{name} must be in [0, 1]")
 
 
 def _validate_state(config: AppConfig) -> None:

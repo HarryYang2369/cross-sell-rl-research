@@ -119,6 +119,21 @@ class CrossSellSimulator:
     def n_actions(self) -> int:
         return self._owned.shape[1]
 
+    @property
+    def contexts(self) -> np.ndarray:
+        """Context matrix of the offerable customers ``(n_customers, context_dim)``."""
+        return self._contexts
+
+    @property
+    def probabilities(self) -> np.ndarray:
+        """Conversion probability per customer and action ``(n_customers, n_actions)``."""
+        return self._probabilities
+
+    @property
+    def owned(self) -> np.ndarray:
+        """Initial ownership matrix ``(n_customers, n_actions)`` (bool)."""
+        return self._owned
+
     def context(self, customer: int) -> np.ndarray:
         return self._contexts[customer]
 
